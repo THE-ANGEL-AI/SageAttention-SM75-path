@@ -34,7 +34,7 @@
 // SM75 MMA Shapes
 #define MMA_QK_M_SM75 8
 #define MMA_QK_N_SM75 8
-#define MMA_QK_K_SM75 32 // INT8 MMA K dim (m8n8k32 for Turing)
+#define MMA_QK_K_SM75 16 // INT8 MMA K dim (m8n8k16 for SM75 Turing)
 
 #define MMA_SV_M_SM75 16
 #define MMA_SV_N_SM75 8
@@ -95,7 +95,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
 
     // --- Register Allocation ---
     // QK Accumulator (INT8 MMA -> INT32)
-    // m8n8k32: each thread holds 4 int32 accumulators (PTX: {%0, %1, %2, %3})
+    // m8n8k16: each thread holds 4 int32 accumulators (PTX: {%0, %1, %2, %3})
     constexpr int NUM_QK_ACCUM = 4;
     int32_t RS_accum[NUM_QK_ACCUM];
 
@@ -220,20 +220,20 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 #pragma unroll
                 for(int hk = 0; hk < head_dim / MMA_QK_K_SM75; ++hk) { // Iterate over K dimension
                     // 1. Load Q fragment (mA x kA) from smem_Q into registers (Packed into uint32_t)
-                    //    m8n8k32 A operand: 4 x uint32_t (PTX: {%4, %5, %6, %7})
+                    //    m8n8k16 A operand: 4 x uint32_t (PTX: {%4, %5, %6, %7})
                     uint32_t q_frag_reg[4] = {0,0,0,0}; // INT8 Q fragment packed into 4 uint32
                     // TODO: Implement ldmatrix_m8n8x4 loading from smem_Q
                     // mma::ldmatrix_m8n8x4(q_frag_reg, smem_Q + (q_start_warp + mq * MMA_QK_M_SM75) * HEAD_DIM_PADDED_INT8 + hk * MMA_QK_K_SM75);
 
 
                     // 2. Load K fragment (kB x nB) from smem_K into registers (Packed into uint32_t)
-                    //    m8n8k32 B operand: 2 x uint32_t (PTX: {%8, %9})
+                    //    m8n8k16 B operand: 2 x uint32_t (PTX: {%8, %9})
                     uint32_t k_frag_reg[2] = {0,0}; // INT8 K fragment packed into 2 uint32
                     // ... loading logic ...
 
-                    // 3. Perform MMA (m8n8k4)
-                    //    mma.m8n8k4(RS_accum, q_frag_reg, k_frag_reg) // Conceptual call
-                    mma::mma_sync_m8n8k32_row_col_s8s8s32<mma::MMAMode::kInplaceUpdate>(RS_accum, q_frag_reg, k_frag_reg);
+                    // 3. Perform MMA (m8n8k16)
+                    //    mma.m8n8k16(RS_accum, q_frag_reg, k_frag_reg) // Conceptual call
+                    mma::mma_sync_m8n8k16_row_col_s8s8s32<mma::MMAMode::kInplaceUpdate>(RS_accum, q_frag_reg, k_frag_reg);
 
                 } // End K dimension loop
 
