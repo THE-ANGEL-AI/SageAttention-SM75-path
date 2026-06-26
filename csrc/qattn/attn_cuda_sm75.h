@@ -290,18 +290,19 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 float o_scale = math::ptx_exp2(m_prev - m_new);
                 l_i[mq] *= o_scale;
 
-                // Renormalize PV accumulators.
-                // With m16n8k8, RO_accum is flat (no mq dimension).
-                // The renormalization applies to ALL V column tiles,
-                // but the P×V contribution for different mq rows is
-                // accumulated into the same RO_accum registers.
-                // We renormalize all accumulators on every mq sub-tile update.
-                #pragma unroll
-                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-                    RO_accum[fk * 4 + 0] *= o_scale;
-                    RO_accum[fk * 4 + 1] *= o_scale;
-                    RO_accum[fk * 4 + 2] *= o_scale;
-                    RO_accum[fk * 4 + 3] *= o_scale;
+                // Renormalize PV accumulators — per-thread-group only.
+                // Threads 0-15 produce output rows 0-7 (mq=0 sub-tile),
+                // threads 16-31 produce output rows 8-15 (mq=1 sub-tile).
+                // Only scale threads that belong to this mq's row group.
+                // NOTE: lane_id < 16 is a compile-time-known bool for m16n8k8.
+                if ((mq == 0 && lane_id < 16) || (mq == 1 && lane_id >= 16)) {
+                    #pragma unroll
+                    for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+                        RO_accum[fk * 4 + 0] *= o_scale;
+                        RO_accum[fk * 4 + 1] *= o_scale;
+                        RO_accum[fk * 4 + 2] *= o_scale;
+                        RO_accum[fk * 4 + 3] *= o_scale;
+                    }
                 }
 
                 // Compute P = exp2(S * sm_scale - m_new)
@@ -336,15 +337,16 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
 
             #pragma unroll
             for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-                // Load P fragment (A operand, 2 b32 registers)
-                // Top 16 threads (output rows 0-7) load P rows 0-7
-                // Bottom 16 threads (output rows 8-15) load P rows 8-15
-                uint32_t p_frag[2] = {0, 0};
-                {
-                    half* p_ptr = smem_P_warp + (lane_id % 8) * MMA_QK_N_SM75;
-                    if (lane_id >= 16) p_ptr += MMA_QK_M_SM75 * MMA_QK_N_SM75; // offset to rows 8-15
-                    mma::ldmatrix_m8n8x2(p_frag, p_ptr);
-                }
+                // Load P fragment (A operand, 2 b32 registers).
+                // P is 16×8: two unconditional ldmatrix calls (top 8 rows, bottom 8 rows),
+                // then select per-thread-group. Avoids predication on ldmatrix.
+                uint32_t p_top[2] = {0, 0};
+                uint32_t p_bot[2] = {0, 0};
+                mma::ldmatrix_m8n8x2(p_top, smem_P_warp + (lane_id % 8) * MMA_QK_N_SM75);
+                mma::ldmatrix_m8n8x2(p_bot, smem_P_warp + MMA_QK_M_SM75 * MMA_QK_N_SM75 + (lane_id % 8) * MMA_QK_N_SM75);
+                uint32_t p_frag[2];
+                p_frag[0] = (lane_id < 16) ? p_top[0] : p_bot[0];
+                p_frag[1] = (lane_id < 16) ? p_top[1] : p_bot[1];
 
                 // Load V fragment (B operand, 1 b32 register)
                 // V is row-major: row = k_start_warp + nk * 8 + lane_id % 8, col = fk * 8
@@ -364,18 +366,11 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
     } // End K tile loop
 
     // --- Final Normalization ---
-    // RO_accum is flat (no mq dimension).  l_i is per-mq, so we average:
-    // Each RO_accum register has contributions from both mq sub-tiles.
-    // Normalize by l_i[0] + l_i[1] (sum of denominators for both row groups).
-    // Actually, the online softmax renormalization already handles this:
-    // for mq=0: RO *= o_scale_0, then P0 × V added
-    // for mq=1: RO *= o_scale_1, then P1 × V added
-    // After the K-tile loop, RO contains correctly scaled sum.
-    // We normalize by dividing by the final l_i.
-    // Since both mq sub-tiles accumulate into the same RO registers,
-    // we use a combined normalization factor.
-    float l_sum = l_i[0] + l_i[1];
-    float l_rcp = (l_sum > 0.0f) ? math::ptx_rcp(l_sum) : 0.0f;
+    // Per-thread-group: threads 0-15 (rows 0-7) normalized by l_i[0],
+    // threads 16-31 (rows 8-15) normalized by l_i[1].
+    float l_rcp_0 = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;
+    float l_rcp_1 = (l_i[1] > 0.0f) ? math::ptx_rcp(l_i[1]) : 0.0f;
+    float l_rcp = (lane_id < 16) ? l_rcp_0 : l_rcp_1;
     #pragma unroll
     for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
         RO_accum[fk * 4 + 0] *= l_rcp;
