@@ -59,6 +59,46 @@ enum class MMAMode {
 };
 
 /*!
+ * \brief Wrapper of PTX ldmatrix m8n8.x1 instruction, loads 1 register
+ *   from shared memory (all 32 threads participate, 1 × .b32 each).
+ *   Used for SM75 m8n8k16 MMA where A/B operands need only 1 register.
+ * \tparam T data type of the fragment
+ * \param R pointer to the fragment (single uint32_t)
+ * \param smem_ptr pointer to the shared memory
+ */
+template <typename T>
+__device__ __forceinline__ void ldmatrix_m8n8x1(uint32_t* R, T* smem_ptr) {
+#if (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 750))
+  uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];\n"
+               : "=r"(R[0])
+               : "r"(smem_int_ptr));
+#else
+  RUNTIME_ASSERT("Unsupported CUDA architecture for ldmatrix instruction");
+#endif
+}
+
+/*!
+ * \brief Wrapper of PTX ldmatrix m8n8.x1 transposed instruction,
+ *   loads 1 register from shared memory and transposes the fragment.
+ *   Used for V (B operand) in SM75 PV MMA where V is row-major in smem.
+ * \tparam T data type of the fragment
+ * \param R pointer to the fragment (single uint32_t)
+ * \param smem_ptr pointer to the shared memory
+ */
+template <typename T>
+__device__ __forceinline__ void ldmatrix_m8n8x1_trans(uint32_t* R, T* smem_ptr) {
+#if (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 750))
+  uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  asm volatile("ldmatrix.sync.aligned.trans.m8n8.x1.shared.b16 {%0}, [%1];\n"
+               : "=r"(R[0])
+               : "r"(smem_int_ptr));
+#else
+  RUNTIME_ASSERT("Unsupported CUDA architecture for ldmatrix instruction");
+#endif
+}
+
+/*!
  * \brief Wrapper of PTX ldmatrix m8n8.x2 instruction, loads data from shared memory
  *   to fragment
  * \tparam T data type of the fragment
@@ -654,68 +694,96 @@ __device__ __forceinline__ void rowsum_f8f8f32(float* d, uint32_t* s) {
 }
 
 // ===== SM75 (Turing) MMA wrappers =====
+// All SM75 wrappers require __CUDA_ARCH__ >= 750.
+#if (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 750))
+#define MMA_SM75_ENABLED
+#endif
+
 // mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32
-// Valid for SM75+ int8 tensor cores: A=4×uint32, B=4×uint32, C/D=4×int32
+// Valid for SM75+ int8 tensor cores:
+//   A = 1 × uint32  (4 × s8 packed into 1 × b32)
+//   B = 1 × uint32  (4 × s8 packed into 1 × b32)
+//   C/D = 2 × int32 (2 × s32 per thread, each holds 4 elements of the 8×8 output)
 // NOTE: m8n8k32 does NOT exist in PTX ISA. K=32 variants use m16n8k32 for SM80+.
+// NOTE: m16n8k8 does NOT exist in PTX ISA for SM75 — only SM80+.
 // NOTE: PTX requires D and C operands to be non-overlapping registers.
 // We use earlyclobber ("=&") to enforce disjoint output/input register allocation.
 template <MMAMode mma_mode = MMAMode::kInplaceUpdate>
 __device__ __forceinline__ void mma_sync_m8n8k16_row_col_s8s8s32(int32_t* C, uint32_t* A, uint32_t* B) {
-  // Use local temporaries for D output to guarantee no overlap with C input
-  int32_t C_out[4];
+#ifdef MMA_SM75_ENABLED
+  int32_t C_out[2];
   if constexpr (mma_mode == MMAMode::kInplaceUpdate) {
     asm volatile(
         "mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 "
-        "{%0, %1, %2, %3},"
-        "{%4, %5, %6, %7},"
-        "{%8, %9, %10, %11},"
-        "{%12, %13, %14, %15};\n"
-        : "=&r"(C_out[0]), "=&r"(C_out[1]), "=&r"(C_out[2]), "=&r"(C_out[3])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]), "r"(B[2]), "r"(B[3]),
-          "r"(C[0]), "r"(C[1]), "r"(C[2]), "r"(C[3]));
+        "{%0, %1},"
+        "{%2},"
+        "{%3},"
+        "{%4, %5};\n"
+        : "=&r"(C_out[0]), "=&r"(C_out[1])
+        : "r"(A[0]),
+          "r"(B[0]),
+          "r"(C[0]), "r"(C[1]));
   } else {
     asm volatile(
         "mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 "
-        "{%0, %1, %2, %3},"
-        "{%4, %5, %6, %7},"
-        "{%8, %9, %10, %11},"
-        "{%12, %13, %14, %15};\n"
-        : "=&r"(C_out[0]), "=&r"(C_out[1]), "=&r"(C_out[2]), "=&r"(C_out[3])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]), "r"(B[2]), "r"(B[3]),
-          "r"(0), "r"(0), "r"(0), "r"(0));
+        "{%0, %1},"
+        "{%2},"
+        "{%3},"
+        "{%4, %5};\n"
+        : "=&r"(C_out[0]), "=&r"(C_out[1])
+        : "r"(A[0]),
+          "r"(B[0]),
+          "r"(0), "r"(0));
   }
-  #pragma unroll
-  for (int _i = 0; _i < 4; _i++) C[_i] = C_out[_i];
+  C[0] = C_out[0];
+  C[1] = C_out[1];
+#else
+  RUNTIME_ASSERT("mma_sync_m8n8k16_row_col_s8s8s32 requires SM75+ (Turing)");
+#endif
 }
 
-// mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32
+// mma.sync.aligned.m8n8k16.row.col.f32.f16.f16.f32
+// Valid for SM75+ (Turing) fp16 tensor cores (PTX ISA 6.5+):
+//   A = 1 × uint32 (2 × f16 packed into 1 × b32)
+//   B = 1 × uint32 (2 × f16 packed into 1 × b32)
+//   C/D = 2 × float (2 × f32 per thread, each holds 4 elements of the 8×8 output)
+// NOTE: SM75 valid fp16 MMA shapes: m8n8k4, m8n8k16, m16n8k8, m32n8k16 (PTX ISA 6.5).
+//       m16n8k8 IS valid on SM75 (macro MMA_F16F16F32_M16N8K8_ENABLED is defined).
+//       m16n8k16 and m16n16k16 require SM80+ (Ampere).
+// NOTE: m8n8k16 uses A=1, B=1, C/D=2 registers (see PTX ISA for register layout).
 // NOTE: PTX requires D and C operands to be non-overlapping registers.
 template <MMAMode mma_mode = MMAMode::kInplaceUpdate>
-__device__ __forceinline__ void mma_sync_m16n8k8_row_col_f16f16f32(float* C, uint32_t* A, uint32_t* B) {
-  float C_out[4];
+__device__ __forceinline__ void mma_sync_m8n8k16_row_col_f16f16f32(float* C, uint32_t* A, uint32_t* B) {
+#ifdef MMA_SM75_ENABLED
+  float C_out[2];
   if constexpr (mma_mode == MMAMode::kInplaceUpdate) {
     asm volatile(
-        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
-        "{%0, %1, %2, %3},"
-        "{%4, %5, %6, %7},"
-        "{%8, %9},"
-        "{%10, %11, %12, %13};\n"
-        : "=&f"(C_out[0]), "=&f"(C_out[1]), "=&f"(C_out[2]), "=&f"(C_out[3])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
-          "f"(C[0]), "f"(C[1]), "f"(C[2]), "f"(C[3]));
+        "mma.sync.aligned.m8n8k16.row.col.f32.f16.f16.f32 "
+        "{%0, %1},"
+        "{%2},"
+        "{%3},"
+        "{%4, %5};\n"
+        : "=&f"(C_out[0]), "=&f"(C_out[1])
+        : "r"(A[0]),
+          "r"(B[0]),
+          "f"(C[0]), "f"(C[1]));
   } else {
     asm volatile(
-        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
-        "{%0, %1, %2, %3},"
-        "{%4, %5, %6, %7},"
-        "{%8, %9},"
-        "{%10, %11, %12, %13};\n"
-        : "=&f"(C_out[0]), "=&f"(C_out[1]), "=&f"(C_out[2]), "=&f"(C_out[3])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
-          "f"(0.f), "f"(0.f), "f"(0.f), "f"(0.f));
+        "mma.sync.aligned.m8n8k16.row.col.f32.f16.f16.f32 "
+        "{%0, %1},"
+        "{%2},"
+        "{%3},"
+        "{%4, %5};\n"
+        : "=&f"(C_out[0]), "=&f"(C_out[1])
+        : "r"(A[0]),
+          "r"(B[0]),
+          "f"(0.0f), "f"(0.0f));
   }
-  #pragma unroll
-  for (int _i = 0; _i < 4; _i++) C[_i] = C_out[_i];
+  C[0] = C_out[0];
+  C[1] = C_out[1];
+#else
+  RUNTIME_ASSERT("mma_sync_m8n8k16_row_col_f16f16f32 requires SM75+ (Turing)");
+#endif
 }
 // ===== END SM75 wrappers =====
 

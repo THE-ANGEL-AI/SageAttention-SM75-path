@@ -1,193 +1,173 @@
-# SageAttention
-<!-- We are continuously updating more features. You could **Star** and **Watch** our repository to stay updated.
+<p align="center">
+  <a href="https://boosty.to/the_angel/donate" target="_blank">
+    <img src="https://img.shields.io/badge/💖_Поддержать_проект-Донат_на_Boosty-ff6b6b?style=for-the-badge&logo=boosty" alt="Поддержать проект">
+  </a>
+</p>
 
---- -->
-This repository provides the official implementation of SageAttention and SageAttention2.
+---
 
-**SageAttention: Accurate 8-Bit Attention for Plug-and-play Inference Acceleration**  
-Paper: https://arxiv.org/abs/2410.02367  
-Jintao Zhang, Jia Wei, Haofeng Huang, Pengle Zhang, Jun Zhu, Jianfei Chen
+<h1 align="center">⚡ SageAttention-SM75</h1>
+<h3 align="center">Ускоренное внимание для NVIDIA T4 (Turing) · INT8 QK · FP16 PV · FP32 аккумуляция</h3>
 
-**SageAttention2: Efficient Attention with Thorough Outlier Smoothing and Per-thread INT4 Quantization**  
-Paper: https://arxiv.org/abs/2411.10958  
-Jintao Zhang, Haofeng Huang, Pengle Zhang, Jia Wei, Jun Zhu, Jianfei Chen
+<p align="center">
+  <em>Форк официального <a href="https://github.com/thu-ml/SageAttention">SageAttention</a> с полной оптимизацией под SM75 (Turing) — NVIDIA T4, RTX 2080, Quadro RTX</em>
+</p>
 
-![Local Image](./assets/2.png)
+---
 
-## Current Features
-<!-- This is a beta release of SageAttention2. We welcome any feedback on accuracy, performance issues, bugs, feature requests, or suggestions. Please feel free to open an issue or launch a pull request! -->
+## ⚠️ Статус: Предварительная версия
 
-+ Optmized kernels for **Turing, Ampere, Ada and Hopper GPUs.**
-+ INT8 quantization and smoothing for $QK^\top$ with support for varying granularities.
-+ FP16 quantization for $PV$ (Turing, Ampere, Ada, Hopper).
-+ FP8 quantization for $PV$ (Ada, Hopper).
-+ Two-level accumulation strategy for $PV$ to improve accuracy in FP8 MMA and WGMMA.
-+ Support `torch.compile` with non-cudagraphs mode and distributed inference.
+> **Тестирование активно ведётся.** Кернел проходит юнит-тесты корректности, но end-to-end тесты на видео-моделях (LTX-Video, CogVideoX) и GGUF-инференсе ещё в процессе. Возможны изменения API и доработки производительности.
 
-**🚀 SageAttention achieves surprising speedup on most GPUs without compromising accuracy across all models in a plug-and-play way.**
+---
 
+## 🎯 Для чего этот форк
 
-## Project Updates
-- [2025-03-28]: 🎉SageAttention2 is accepted as an oral paper at SCOPE workshop, ICLR 2025! 
-- [2025-02-25]: 🔥 We release [SpargeAttn](https://github.com/thu-ml/SpargeAttn), a sparse attention based on SageAttention2, which could acclerate any model without training.
-- [2025-02-15]: 🔥 The compilation code is updated to support RTX5090! On RTX5090, SageAttention reaches 560T, 2.7x faster than FlashAttention2!
-- [2025-01-28]: 🔥⚡SageAttention is now available on Hopper GPUs (H100, H800, H20)! It matches the speed of FlashAttention3-FP8 but offers **much better accuracy!**
+Оригинальный SageAttention **не поддерживает SM75 (Turing)** — на T4 он просто не собирается. Мы исправили это и написали полноценный CUDA-кернел для архитектуры Turing, использующий:
 
-| **FlashAttention2** | **FlashAttention3** | **FlashAttention3-FP8** | **SageAttention** |
-|----------------------|----------------------|----------------------|----------------------|
-| ![FlashAttention2](assets/cogvideox1.5_fa2_example.gif) | ![FlashAttention3](assets/cogvideox1.5_fa3_example.gif)  | ![FlashAttention3-FP8](assets/cogvideox1.5_fa3fp8_example.gif) | ![SageAttention](assets/cogvideox1.5_sage_example.gif) |
-| **25'34''** | **17'32''** | **12'14''** | **12'07''** |
+- **INT8 тензорные ядра** для QK<sup>⊤</sup> (m8n8k16 — 130 TOPS)
+- **FP16 тензорные ядра** для PV (m8n8k16 — 65 TFLOPS)
+- **FP32 аккумуляцию** для точности
+- **Полный FlashAttention-совместимый softmax** (онлайн, warp-редукции)
+- **LSE (log-sum-exp)** для Ring Attention / xDiT
 
-*Results for [CogVideoX1.5-5B](https://huggingface.co/THUDM/CogVideoX1.5-5B) on NVIDIA H20 GPU*
+---
 
-![Local Image](./assets/H100_hd128.png)
+## 🚀 Что мы изменили и добавили
 
-![Local Image](./assets/H20_hd128.png)
+### 🔧 CUDA-кернел SM75 (`csrc/qattn/attn_cuda_sm75.h`)
 
-- [2025-01-24]: 🎉SageAttention is accepted by ICLR 2025! 
-- [2024-12-20]: 🔥Update the [SageAttention2 Paper](https://arxiv.org/abs/2411.10958).  
+| Компонент | Что сделано |
+|---|---|
+| **MMA-обёртки** (`csrc/mma.cuh`) | m8n8k16 INT8 + FP16 для SM75 с архитектурными гардами и рантайм-ассертами |
+| **QK MMA** | INT8 m8n8k16 с ldmatrix-загрузкой Q/K фрагментов |
+| **Онлайн-softmax** | Полный FlashAttention: running max/denominator, warp-редукции через `__shfl_xor_sync` |
+| **P → smem → ldmatrix** | Softmax-выход пишется в shared memory, перезагружается через ldmatrix для корректной MMA-раскладки |
+| **PV MMA** | FP16 m8n8k16 — fk-цикл итерирует **столбцы** V (head_dim/8 суб-тайлов) |
+| **2D RO_accum** | Раздельные аккумуляторы для каждого mq-подтайла, онлайн-softmax через K-тайлы |
+| **Output store** | Прямая запись в global O (без smem_O roundtrip) + smem_O staging вариант для бенчмарка |
+| **static_assert** | Проверки на этапе компиляции: делимость head_dim, CTA_Q/WARP_Q, CTA_K/WARP_K |
+| **LSE** | Log-sum-exp возврат с warp-редукциями для Ring Attention |
 
-![Local Image](./assets/4090_hd128.png)  
+### 🐍 Python-уровень (`sageattention/core.py`)
 
-- [2024-12-20]: 🔥Release SageAttention 2.0.1 Beta! In this version, we introduce a new feature: per-thread quantization, which offers finer granularity while maintaining hardware efficiency.
-- [2024-11-21]: 🔥SageAttention 2.0.0 beta is released! Now SageAttention has measured speedup on L20, L40, A100, A800, and A6000, RTX3090 and RTX4090.
-- [2024-11-12]: Support for `sageattn_varlen` is available now.
-- [2024-11-11]: Support for different sequence lengths between `q` and `k,v`,  `(batch_size, head_num, seq_len, head_dim)` or `(batch_size, seq_len, head_num, head_dim)` input shapes, and `group-query attention` is available now.
+| Компонент | Что сделано |
+|---|---|
+| **Авто-диспетчер** | `sageattn()` → SM75 → `sageattn_qk_int8_pv_fp16_cuda_sm75()` |
+| **BF16→FP16** | Авто-каст для Turing (не поддерживает BF16) |
+| **Padding** | Авто-подгон head_dim под 16 (INT8 MMA K) |
+| **Починены баги** | try/except, stray-код, дублирующиеся блоки, экранированные docstring |
 
+### 🧪 Тестирование
 
-## Installation
-### Base environment
-+ `python>=3.9`   , `torch>=2.3.0`  , `triton>=3.0.0` 
-- `CUDA`:
-  + `>=12.8` for Blackwell (Hypothetical)
-  + `>=12.0` for FP8 support on Ada (SM89) and WGMMA on Hopper (SM90)
-  + `>=11.8` recommended for Ampere (SM80, SM86) and Turing (SM75) support. Lower versions might work for specific architectures but are less tested with this project.
-+ `flash-attn` for benchmarking
+| Файл | Что проверяет |
+|---|---|
+| `test_sm75_kernel.py` | 4 конфига head_dim, GQA, causal, LSE, edge cases, back-to-back переиспользование тензора |
+| `bench/bench_sm75_output_store.py` | Микро-бенчмарк: smem_O staging vs прямой вывод (13 конфигов) |
 
-### Install Package
+### 🔌 Интеграция в ComfyUI
 
-For the stable Triton-only version, refer to [SageAttention-1](https://github.com/thu-ml/SageAttention/tree/sageattention-1) and install using pip:
-```
-pip install sageattention==1.0.6
-```
+| Файл | Назначение |
+|---|---|
+| `scripts/ltxv_sageattn_patch.py` | Monkey-patch `F.scaled_dot_product_attention` → SageAttention для LTX-Video |
+| `scripts/build_sm75_kaggle.sh` | Скрипт сборки для Kaggle T4×2 |
 
-To use SageAttention 2.1.1, please **compile from source**:
-```
-git clone https://github.com/thu-ml/SageAttention.git
-cd sageattention 
-python setup.py install  # or pip install -e .
-```
+---
 
-To benchmark the speed against FlashAttention3, please compile FlashAttention3 from source:
-```
-git clone https://github.com/Dao-AILab/flash-attention.git --recursive
-git checkout b7d29fb3b79f0b78b1c369a52aaa6628dabfb0d7 # 2.7.2 release
-cd hopper
-python setup.py install
-```
+## 📊 Ожидаемый прирост скорости
 
-## How to Use
-```python
-from sageattention import sageattn
-attn_output = sageattn(q, k, v, tensor_layout="HND", is_causal=False)
-```
-+ `q, k, v` are **FP16** dtype (BF16 not supported on Turing SM75) with the shape `(batch_size, head_num, seq_len, head_dim)` using default `tensor_layout="HND"`. For shape `(batch_size, seq_len, head_num, head_dim)`, set `tensor_layout="NHD"`. 
-+ `is_causal` determines the use of a causal mask.
+### На одной T4 (FP16 → INT8 attention)
 
-### Available APIs:
-+ `sageattn_qk_int8_pv_fp16_cuda_sm75`: (Turing) INT8 $QK^	op$, FP16 $PV$, FP32 accum. using CUDA. **(Requires SM75)**
-+ `sageattn`: Automatically selects the optimal kernel based on the GPU to achieve a good performance-accuracy trade-off.
-+ `sageattn_qk_int8_pv_fp16_triton`: INT8 quantization for $QK^\top$ and FP16 for $PV$ using Triton backend.
-+ `sageattn_qk_int8_pv_fp16_cuda`: INT8 quantization for $QK^\top$ and FP16 for $PV$ using CUDA backend.
-+ `sageattn_qk_int8_pv_fp8_cuda`: INT8 quantization for $QK^\top$ and FP8 for $PV$ using CUDA backend.
-+ `sageattn_qk_int8_pv_fp8_cuda_sm90`: INT8 quantization for $QK^\top$ and FP8 for $PV$ using CUDA backend, specifically optimized for Hopper GPUs.
-+ `sageattn_varlen`: INT8 quantization for $QK^\top$ and FP16 for $PV$ using Triton backend. Support for varying sequence lengths within the same batch.
+| Длина контекста | Ускорение attention | End-to-end (видео-модели) |
+|---|---|---|
+| 2K | ~1.3× | +10-15% |
+| 8K | ~1.8× | +30-40% |
+| 16K | ~2.5× | +60-75% |
 
-For optimal speed and accuracy performance on custom devices and models, we strongly recommend referring to the [this file](./sageattention/core.py) for detailed guidance.
+### На двух T4 с MultiGPU (Pipeline Parallelism)
 
-> **Note:**
-Support for different sequence lengths between `q` and `k,v` and `group-query attention` is available.
+При правильном распределении слоёв по GPU + INT8 внимании:
+- **LTX-Video 1280×720×15сек**: с ~400 сек/итерацию → **~45-70 сек** (5-9× общий прирост — в основном за счёт устранения PCIe-spill в системную RAM)
 
+---
 
-### Plug-and-play Example
-
-We can replace `scaled_dot_product_attention` easily. 
-We will take [CogvideoX](https://huggingface.co/THUDM/CogVideoX-2b) as an example:
-
-Add the following codes and run
-```diff
-import torch.nn.functional as F
-
-+ from sageattention import sageattn
-+ F.scaled_dot_product_attention = sageattn
-
-```
-
-Specifically,
+## 📦 Установка
 
 ```bash
-cd example
-python cogvideox-2b.py --compile --attention_type sage
+# Клонируем форк
+git clone https://github.com/THE-ANGEL-AI/SageAttention-SM75-path.git
+cd SageAttention-SM75-path
+
+# Собираем SM75 расширение
+python setup.py build_ext --inplace
+
+# Или на Kaggle T4×2:
+bash scripts/build_sm75_kaggle.sh
+
+# Проверяем
+python test_sm75_kernel.py
 ```
 
-**You can get a lossless video in** `./example` **faster than by using** `python cogvideox-2b.py --compile`. More examples and guidance can be found under the `example/` directory.
+**Требования:** Python ≥3.9, PyTorch ≥2.3, CUDA ≥11.8, NVIDIA T4 (или другой SM75 GPU)
 
-> **Note:** Not all models works with `F.scaled_dot_product_attention = sageattn`. Technically, you should replace the original Attention by modifying the `Attention Class` of the target model. For image and video models, we suggest only replacing the attention in DiT (see `example/mochi.py` for detail).
+---
 
-### Kernel Benchmarking
-We provide a benchmarking script to compare the speed of different kernels including SageAttention, FlashAttention2 and FlashAttention3. Please refer to the `benchmark/` directory for more details.
- 
-## Performance
-### Speed of Kernels
+## 🔧 Быстрый старт
 
-`8+8` means the kernel with INT8 quantization for $QK^\top$ and FP8 quantization for $PV$. `8+16` uses FP16 with FP16 accumulator for $PV$.
+```python
+from sageattention import sageattn
+import torch.nn.functional as F
 
-![Local Image](./assets/4090_hd128.png)
+# Вариант 1: Прямой вызов
+output = sageattn(q, k, v, tensor_layout="HND", is_causal=False)
 
-![Local Image](./assets/L20_hd128.png)
-
-![Local Image](./assets/H100_hd128.png)
-
-![Local Image](./assets/H20_hd128.png)
-
-![Local Image](./assets/A100_hd128.png)
-
-![Local Image](./assets/3090_hd128.png)
-
-> **Note:** The TOPS results refer only to the Attention Kernel, excluding the quantization and smoothing.
-
-### End-to-end Performance
-#### **End-to-End Accuracy:**
-
-![Local Image](./assets/22.png)
-
-![Local Image](./assets/23.png)
-
-![Local Image](./assets/24.png)
-
-![Local Image](./assets/25.png)
-
-#### **End-to-End Speedup:**
-
-![Local Image](./assets/26.png)
-
-## Citation
-**If you use this code or find our work valuable, please cite:**
+# Вариант 2: Monkey-patch (все sdpa вызовы → SageAttention)
+F.scaled_dot_product_attention = sageattn
 ```
-@inproceedings{zhang2025sageattention,
-      title={SageAttention: Accurate 8-Bit Attention for Plug-and-play Inference Acceleration}, 
-      author={Zhang, Jintao and Wei, Jia and Zhang, Pengle and Zhu, Jun and Chen, Jianfei},
-      booktitle={International Conference on Learning Representations (ICLR)},
-      year={2025}
-}
 
-@misc{zhang2024sageattention2,
-      title={SageAttention2: Efficient Attention with Thorough Outlier Smoothing and Per-thread INT4 Quantization}, 
-      author={Jintao Zhang and Haofeng Huang and Pengle Zhang and Jia Wei and Jun Zhu and Jianfei Chen},
-      year={2024},
-      eprint={2411.10958},
-      archivePrefix={arXiv},
-      primaryClass={cs.LG},
-      url={https://arxiv.org/abs/2411.10958}, 
-}
+**Интеграция в ComfyUI (LTX-Video):**
+```python
+# В ноде загрузчика LTX-Video добавьте:
+from ltxv_sageattn_patch import apply_patch
+apply_patch(smooth_k=True, qk_quant_gran='per_warp')
 ```
+
+---
+
+## 📁 Структура проекта
+
+```
+SageAttention-SM75-path/
+├── csrc/qattn/
+│   ├── attn_cuda_sm75.h       # ← основной SM75-кернел
+│   ├── pybind_sm75.cpp         # ← pybind-регистрация
+│   └── qk_int_sv_f16_cuda_sm75.cu
+├── csrc/mma.cuh                # ← SM75 MMA-обёртки (int8 + fp16)
+├── sageattention/core.py       # ← авто-диспетчер + SM75-функция
+├── test_sm75_kernel.py         # ← юнит-тесты
+├── bench/bench_sm75_output_store.py  # ← бенчмарк output store
+├── scripts/
+│   ├── build_sm75_kaggle.sh    # ← сборка на Kaggle
+│   └── ltxv_sageattn_patch.py  # ← патч для ComfyUI LTX-Video
+└── setup.py                    # ← сборка с флагом HAS_SM75
+```
+
+---
+
+## 🙏 Благодарности
+
+Оригинальный SageAttention: [thu-ml/SageAttention](https://github.com/thu-ml/SageAttention) — Jintao Zhang, Jia Wei, Haofeng Huang, Pengle Zhang, Jun Zhu, Jianfei Chen.
+
+Форк основан на [XUANNISSAN/SageAttention-SM75-path](https://github.com/XUANNISSAN/SageAttention-SM75-path).
+
+---
+
+<p align="center">
+  <a href="https://boosty.to/the_angel/donate" target="_blank">
+    <img src="https://img.shields.io/badge/💖_Поддержать_проект-Донат_на_Boosty-ff6b6b?style=for-the-badge&logo=boosty" alt="Поддержать проект">
+  </a>
+</p>
+
+<p align="center">
+  <sub>⚡ SageAttention-SM75 · Предварительная версия · Тестирование в процессе</sub>
+</p>

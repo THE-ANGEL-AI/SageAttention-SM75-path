@@ -28,34 +28,24 @@ from .triton.quant_per_thread import per_thread_int8 as per_thread_int8_triton
 
 
 try:
-    from . import _qattn_sm75 # Added SM75
+    from . import _qattn_sm75  # SM75 (Turing: T4, RTX 2080)
     SM75_ENABLED = True
 except ImportError:
     SM75_ENABLED = False
 
-
 try:
-    try:
     from . import _qattn_sm80
     SM80_ENABLED = True
 except ImportError:
     SM80_ENABLED = False
-    SM80_ENABLED = True
-except:
-    SM80_ENABLED = False
 
 try:
-    try:
     from . import _qattn_sm89
     SM89_ENABLED = True
 except ImportError:
     SM89_ENABLED = False
-    SM89_ENABLED = True
-except:
-    SM89_ENABLED = False
 
 try:
-    try:
     from . import _qattn_sm90
     SM90_ENABLED = True
 except ImportError:
@@ -103,13 +93,6 @@ else:
          raise ImportError("Fused CUDA kernels required for sub_mean not built.")
     def per_channel_fp8(*args, **kwargs):
          raise ImportError("Fused CUDA kernels required for per_channel_fp8 not built.")
-
-    SM90_ENABLED = True
-except:
-    SM90_ENABLED = False
-
-
-
 
 
 
@@ -225,11 +208,8 @@ def sageattn(
             # SM75 specific defaults if needed, e.g., only 'per_warp' might be efficient
             qk_quant_gran=kwargs.get("qk_quant_gran", "per_warp"),
         )
-    el[q.device.index]
-    if arch == "sm80":
+    elif arch == "sm80" or arch == "sm86":
         return sageattn_qk_int8_pv_fp16_cuda(q, k, v, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32")
-    elif arch == "sm86":
-        return sageattn_qk_int8_pv_fp16_triton(q, k, v, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse)
     elif arch == "sm89":
         return sageattn_qk_int8_pv_fp8_cuda(q, k, v, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32+fp32")
     elif arch == "sm90":
@@ -241,13 +221,6 @@ def sageattn(
 
 @torch.compiler.disable
 def sageattn_qk_int8_pv_fp16_triton(
-    dtype = q.dtype
-    if get_cuda_arch_versions() == "sm75" and dtype == torch.bfloat16:
-        warnings.warn("BF16 not supported on SM75. Casting input to FP16 for Triton kernel.")
-        q = q.to(torch.float16)
-        k = k.to(torch.float16)
-        # v gets converted inside anyway
-
     q: torch.Tensor, 
     k: torch.Tensor, 
     v: torch.Tensor, 
@@ -391,13 +364,6 @@ def sageattn_qk_int8_pv_fp16_triton(
 
 @torch.compiler.disable
 def sageattn_varlen(
-    dtype = q.dtype
-    if get_cuda_arch_versions() == "sm75" and dtype == torch.bfloat16:
-        warnings.warn("BF16 not supported on SM75. Casting input to FP16 for Triton varlen kernel.")
-        q = q.to(torch.float16)
-        k = k.to(torch.float16)
-        # v gets converted inside anyway
-
     q: torch.Tensor, 
     k: torch.Tensor, 
     v: torch.Tensor, 
@@ -529,13 +495,13 @@ def sageattn_qk_int8_pv_fp16_cuda_sm75(
     return_lse: bool = False,
     **kwargs: Any,
 ) -> torch.Tensor:
-    \"\"\"
+    """
     SageAttention SM75: INT8 QK, FP16 PV, FP32 Accumulation (CUDA).
 
     Parameters are similar to other sageattn functions, but BF16 input is not supported.
     `pv_accum_dtype` is fixed to FP32 conceptually for this kernel.
     Requires fused CUDA kernels for quantization.
-    \"\"\"
+    """
     dtype = q.dtype
     if not SM75_ENABLED:
          raise ImportError("SageAttention SM75 kernels not built. Please recompile.")
@@ -666,76 +632,6 @@ def sageattn_qk_int8_pv_fp16_cuda_sm75(
              # Apply correction using original scale
              final_lse += lse_correction * (head_dim_og**-0.5) # Use original scale here
         return o, final_lse
-    else:
-        return o
-
-    _tensor_layout = 0 if tensor_layout == "NHD" else 1
-    _is_caual = 1 if is_causal else 0
-    _qk_quant_gran = 3 if qk_quant_gran == "per_thread" else 2
-    _return_lse = 1 if return_lse else 0
-
-    head_dim_og = q.size(-1)
-
-    if head_dim_og < 64:
-        q = torch.nn.functional.pad(q, (0, 64 - head_dim_og))
-        k = torch.nn.functional.pad(k, (0, 64 - head_dim_og))
-        v = torch.nn.functional.pad(v, (0, 64 - head_dim_og))
-    elif head_dim_og > 64 and head_dim_og < 128:
-        q = torch.nn.functional.pad(q, (0, 128 - head_dim_og))
-        k = torch.nn.functional.pad(k, (0, 128 - head_dim_og))
-        v = torch.nn.functional.pad(v, (0, 128 - head_dim_og))
-    elif head_dim_og > 128:
-        raise ValueError(f"Unsupported head_dim: {head_dim_og}")
-
-    # assert last dim is contiguous
-    assert q.stride(-1) == 1 and k.stride(-1) == 1 and v.stride(-1) == 1, "Last dim of qkv must be contiguous."
-
-    if sm_scale is None:
-        sm_scale = head_dim_og**-0.5
-
-    seq_dim = 1 if _tensor_layout == 0 else 2
-
-    if smooth_k:
-        km = k.mean(dim=seq_dim, keepdim=True)
-        if return_lse:
-            if tensor_layout == "NHD":
-                lse_correction = torch.matmul(q.transpose(1, 2), km.transpose(1, 2).transpose(2, 3)).squeeze(-1).to(torch.float32)
-            else:
-                lse_correction = torch.matmul(q, km.transpose(2, 3)).squeeze(-1).to(torch.float32)
-    else:
-        km = None
-
-    if qk_quant_gran == "per_warp":
-        q_int8, q_scale, k_int8, k_scale = per_warp_int8_cuda(q, k, km, tensor_layout=tensor_layout, BLKQ=128, WARPQ=(16 if (q.size(-1) == 128 and pv_accum_dtype == "fp16+fp32") else 32), BLKK=64)
-    elif qk_quant_gran == "per_thread":
-        q_int8, q_scale, k_int8, k_scale = per_thread_int8_triton(q, k, km, tensor_layout=tensor_layout, BLKQ=128, WARPQ=(16 if (q.size(-1) == 128 and pv_accum_dtype == "fp16+fp32") else 32), BLKK=64, WARPK=64)
-
-    o = torch.empty(q.size(), dtype=dtype, device=q.device)
-
-    if pv_accum_dtype in ["fp32", "fp16+fp32"] and smooth_v:
-        warnings.warn(f"pv_accum_dtype is {pv_accum_dtype}, smooth_v will be ignored.")
-        smooth_v = False
-
-    if pv_accum_dtype == 'fp32':
-        v = v.to(torch.float16)
-        lse = _qattn_sm80.qk_int8_sv_f16_accum_f32_attn(q_int8, k_int8, v, o, q_scale, k_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
-    elif pv_accum_dtype == "fp16":
-        if smooth_v:
-            smoothed_v, vm = sub_mean(v, tensor_layout=tensor_layout)
-            lse = _qattn_sm80.qk_int8_sv_f16_accum_f16_fuse_v_mean_attn(q_int8, k_int8, smoothed_v, o, q_scale, k_scale, vm, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
-        else:
-            v = v.to(torch.float16)
-            lse = _qattn_sm80.qk_int8_sv_f16_accum_f16_attn(q_int8, k_int8, v, o, q_scale, k_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
-    elif pv_accum_dtype == "fp16+fp32":
-        v = v.to(torch.float16)
-        lse = _qattn_sm80.qk_int8_sv_f16_accum_f16_attn_inst_buf(q_int8, k_int8, v, o, q_scale, k_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
-    else:
-        raise ValueError(f"Unsupported pv_accum_dtype: {pv_accum_dtype}")
-
-    o = o[..., :head_dim_og]
-
-    if return_lse:
-        return o, lse / 1.44269504 + lse_correction * sm_scale if smooth_k else lse / 1.44269504
     else:
         return o
 

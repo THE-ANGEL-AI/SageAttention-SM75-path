@@ -33,6 +33,6 @@
               "Tensor " #x " must have shape (" #__VA_ARGS__ ")")
 #define CHECK_CONTIGUOUS(x) \
   TORCH_CHECK(x.is_contiguous(), "Tensor " #x " must be contiguous")
-#define CHECK_LASTDIM_CONTIGUOUS(x) \
-  TORCH_CHECK(x.stride(-1) == 1,    \
+#define CHECK_LASTDIM_CONTIGUOUS(x)                             \
+  TORCH_CHECK(x.stride(-1) == 1,                                \
               "Tensor " #x " must be contiguous at the last dimension")

@@ -20,6 +20,6 @@
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-  m.def("qk_int8_sv_f16_accum_f32_attn_sm75", &qk_int8_sv_f16_accum_f32_attn_sm75, "SM75: QK int8 sv f16 accum f32 attn");
-  // Bind other variants if created
+  m.def("qk_int8_sv_f16_accum_f32_attn_sm75", &qk_int8_sv_f16_accum_f32_attn_sm75, "SM75: QK int8 sv f16 accum f32 attn (direct output)");
+  m.def("qk_int8_sv_f16_accum_f32_attn_sm75_smem_o", &qk_int8_sv_f16_accum_f32_attn_sm75_smem_o, "SM75: QK int8 sv f16 accum f32 attn (smem_O staging output)");
 }

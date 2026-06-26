@@ -36,14 +36,15 @@
 #define MMA_QK_N_SM75 8
 #define MMA_QK_K_SM75 16 // INT8 MMA K dim (m8n8k16 for SM75 Turing)
 
-#define MMA_SV_M_SM75 16
+#define MMA_SV_M_SM75 8  // m8n8k16 fp16 MMA M dim (SM75: m8, not m16)
 #define MMA_SV_N_SM75 8
-#define MMA_SV_K_SM75 8 // FP16 MMA K dim
+#define MMA_SV_K_SM75 16 // m8n8k16 fp16 MMA K dim
 
 // --- SM75 Kernel Implementation ---
 template< uint32_t CTA_Q, uint32_t CTA_K, uint32_t WARP_Q, uint32_t WARP_K, uint32_t head_dim,
           QuantGranularity Q_GRAN, QuantGranularity K_GRAN,
-          typename DTypeOut, MaskMode mask_mode, bool return_lse>
+          typename DTypeOut, MaskMode mask_mode, bool return_lse,
+          bool USE_SMEM_O_OUTPUT = false>
 __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                     int8_t *__restrict__ Q, int8_t *__restrict__ K, half *__restrict__ V,
                     DTypeOut *__restrict__ O, float *__restrict__ Lse,
@@ -58,10 +59,23 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
     // SM75 supports FP16 only for V/O with this kernel path
     static_assert(std::is_same<DTypeOut, half>::value, "SM75 kernel only supports FP16 output.");
 
+    // --- Compile-time shape validation ---
+    // head_dim must be divisible by MMA tile sizes (INT8 K=16, FP16 N=8)
+    static_assert(head_dim % MMA_QK_K_SM75 == 0,
+        "head_dim must be divisible by MMA_QK_K_SM75 (16) for INT8 MMA K dimension");
+    static_assert(head_dim % MMA_SV_N_SM75 == 0,
+        "head_dim must be divisible by MMA_SV_N_SM75 (8) for FP16 PV MMA N dimension");
+    // CTA tile must subdivide evenly into warp tiles
+    static_assert(CTA_Q % WARP_Q == 0,
+        "CTA_Q must be divisible by WARP_Q");
+    static_assert(CTA_K % WARP_K == 0,
+        "CTA_K must be divisible by WARP_K");
+
     // --- Thread/Block Indexing ---
     const uint32_t lane_id = threadIdx.x % 32; // Lane index within the warp (0-31)
     const uint32_t warp_id_in_block = threadIdx.x / 32; // Warp index within the CTA
     const uint32_t num_warps_per_block = blockDim.x / 32;
+    (void)num_warps_per_block; // Reserved for future assert/check
 
     // Divide warps between Q and K dimensions
     // Example: Assign warps round-robin or block-wise. Let's try block-wise.
@@ -90,34 +104,51 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
     int8_t* smem_Q = smem_storage;
     int8_t* smem_K = smem_Q + CTA_Q * HEAD_DIM_PADDED_INT8;
     half*   smem_V = reinterpret_cast<half*>(smem_K + CTA_K * HEAD_DIM_PADDED_INT8);
-    // Optional: Allocate shared memory for output tile if needed for coalescing stores
-    // half*   smem_O = reinterpret_cast<half*>(smem_V + CTA_K * HEAD_DIM_PADDED_FP16);
-
+    // Per-warp P buffer for PV MMA: each warp stores its 8×8 fp16 softmax output
+    // before loading via ldmatrix for correct MMA thread→data distribution.
+    constexpr int P_TILE_ELEMS = MMA_QK_M_SM75 * MMA_QK_N_SM75; // 8×8 = 64 halfs
+    half*   smem_P = reinterpret_cast<half*>(smem_V + CTA_K * HEAD_DIM_PADDED_FP16);
+    // Output staging buffer (only when USE_SMEM_O_OUTPUT=true).
+    // Layout: CTA_Q rows × head_dim columns, row-major, half precision, no padding.
+    half*   smem_O = nullptr;
+    if constexpr (USE_SMEM_O_OUTPUT) {
+        smem_O = reinterpret_cast<half*>(smem_P + (CTA_Q / WARP_Q) * (CTA_K / WARP_K) * P_TILE_ELEMS);
+    }
     // --- Register Allocation ---
+    // Tile counts (kernel-scope, used throughout)
+    constexpr int NUM_M_TILES = WARP_Q / MMA_QK_M_SM75;   // 2
+    constexpr int NUM_N_TILES = WARP_K / MMA_QK_N_SM75;   // 2
+    constexpr int NUM_N_V_TILES = head_dim / MMA_SV_N_SM75; // V column sub-tiles (e.g. 8 for hd=64)
+
     // QK Accumulator (INT8 MMA -> INT32)
-    // m8n8k16: each thread holds 4 int32 accumulators (PTX: {%0, %1, %2, %3})
-    constexpr int NUM_QK_ACCUM = 4;
+    // m8n8k16: each thread holds 2 int32 accumulators (PTX: {%0, %1})
+    constexpr int NUM_QK_ACCUM = 2;
     int32_t RS_accum[NUM_QK_ACCUM];
 
     // PV Accumulator (FP16 MMA -> FP32)
-    // Example: m16n8k8 => each thread needs 4 FP32 accumulators.
-    constexpr int NUM_PV_ACCUM = 4;
-    float RO_accum[NUM_PV_ACCUM];
+    // SM75: m8n8k16 => 2 FP32 outputs per MMA call.
+    // NUM_N_V_TILES = head_dim / MMA_SV_N V column sub-tiles.
+    // Each (mq, fk) sub-tile needs 2 accumulators.
+    // 2D layout: RO_accum[mq][fk*2+0..1] stored flat.
+    constexpr int NUM_PV_ACCUM_PER_M_TILE = NUM_N_V_TILES * 2;
+    constexpr int NUM_PV_ACCUM_TOTAL = NUM_M_TILES * NUM_PV_ACCUM_PER_M_TILE;
+    float RO_accum[NUM_PV_ACCUM_TOTAL];
 
-    // Softmax state (per row handled by a group of threads, typically a warp)
-    // Each warp handles WARP_Q rows. Each thread handles WARP_Q / warp_size_rows rows?
-    // Let's assume each thread handles a fraction of the rows within its warp-Q-tile.
-    // Simplification: Each thread tracks m/l for the rows it calculates within the MMA tile.
-    // E.g., for m16n8k8 PV MMA, each thread calculates 4 output elements.
-    float m_i[NUM_PV_ACCUM]; // Max per output element row fragment
-    float l_i[NUM_PV_ACCUM]; // Sum per output element row fragment
+    // --- Online Softmax State ---
+    // SM75 m8n8k16 MMA: each thread handles 1 row per mq sub-tile (2 values c0,c1).
+    // m_i[mq] and l_i[mq] track the running max/denominator for the row.
+    float m_i[NUM_M_TILES]; // Running max per mq sub-tile
+    float l_i[NUM_M_TILES]; // Running sum per mq sub-tile
 
-    // --- Initialization ---
+    // --- Initialization (once, before all K tiles) ---
     #pragma unroll
-    for (int i = 0; i < NUM_PV_ACCUM; ++i) {
+    for (int i = 0; i < NUM_PV_ACCUM_TOTAL; ++i) {
         RO_accum[i] = 0.0f;
-        m_i[i] = -INFINITY; // Use INFINITY macro or a large negative number
-        l_i[i] = 0.0f;      // Start sum at 0, will be exp(m_i - m_ij) + ...
+    }
+    #pragma unroll
+    for (int i = 0; i < NUM_M_TILES; ++i) {
+        m_i[i] = -1e30f;
+        l_i[i] = 0.0f;
     }
 
     // --- Load Q tile into Shared Memory ---
@@ -165,6 +196,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
         const uint32_t k_start_row_block = k_tile_idx * CTA_K;
         const bool is_boundary_k_iter = (k_tile_idx == k_boundary_check_iteration);
         const uint32_t current_k_block_len = is_boundary_k_iter ? k_boundary_len : CTA_K;
+        (void)current_k_block_len; // Reserved for boundary-aware load/loop logic
 
         // Load K & V tiles into Shared Memory for the current iteration
         #pragma unroll
@@ -201,191 +233,214 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
         }
         float current_dequant_scale = q_scale_val * k_scale_val;
 
-        // --- QK^T Computation (using INT8 MMA) ---
+        // --- QK^T Computation (using INT8 MMA) with Online Softmax ---
         // Each warp computes a WARP_Q x WARP_K tile of S = QK^T
+        // SM75 m8n8k16 MMA: all 32 threads participate, organized into 4 groups of 8.
+        // Each thread i computes row r = i % 8, with 2 values at cols c0 = (i/8)*2, c1 = (i/8)*2+1.
+        // Softmax warp reductions: threads {r, r+8, r+16, r+24} share row r.
         uint32_t q_start_warp = warp_idx_q * WARP_Q;
         uint32_t k_start_warp = warp_idx_k * WARP_K;
 
-        // Loop structure depends heavily on MMA shape and tile assignment per thread
-        // This part requires careful mapping of threads to MMA inputs/outputs.
-        // Placeholder for the complex loop structure:
         #pragma unroll
-        for(int mq = 0; mq < WARP_Q / MMA_QK_M_SM75; ++mq) { // Iterate over M dimension within warp tile
-             #pragma unroll
-             for(int nk = 0; nk < WARP_K / MMA_QK_N_SM75; ++nk) { // Iterate over N dimension within warp tile
-                // Reset QK accumulators for this S tile fragment
+        for(int mq = 0; mq < NUM_M_TILES; ++mq) {
+            // NOTE: RO_accum[mq][*], m_i[mq], l_i[mq] CARRY OVER across K tiles
+            // (online softmax). Only initialized once before the K-tile loop.
+
+            #pragma unroll
+            for(int nk = 0; nk < NUM_N_TILES; ++nk) {
+                // --- QK MMA: compute S[mq, nk] = Q[mq] × K[nk]^T ---
                 #pragma unroll
-                for(int acc_idx=0; acc_idx < NUM_QK_ACCUM; ++acc_idx) RS_accum[acc_idx] = 0;
+                for(int acc_idx = 0; acc_idx < NUM_QK_ACCUM; ++acc_idx) RS_accum[acc_idx] = 0;
 
                 #pragma unroll
-                for(int hk = 0; hk < head_dim / MMA_QK_K_SM75; ++hk) { // Iterate over K dimension
-                    // 1. Load Q fragment (mA x kA) from smem_Q into registers (Packed into uint32_t)
-                    //    m8n8k16 A operand: 4 x uint32_t (PTX: {%4, %5, %6, %7})
-                    uint32_t q_frag_reg[4] = {0,0,0,0}; // INT8 Q fragment packed into 4 uint32
-                    // TODO: Implement ldmatrix_m8n8x4 loading from smem_Q
-                    // mma::ldmatrix_m8n8x4(q_frag_reg, smem_Q + (q_start_warp + mq * MMA_QK_M_SM75) * HEAD_DIM_PADDED_INT8 + hk * MMA_QK_K_SM75);
+                for(int hk = 0; hk < head_dim / MMA_QK_K_SM75; ++hk) {
+                    // Load Q fragment (int8, row-major, A operand for MMA)
+                    int8_t* smem_Q_ptr = smem_Q + (q_start_warp + mq * MMA_QK_M_SM75 + lane_id % 8) * HEAD_DIM_PADDED_INT8 + hk * MMA_QK_K_SM75;
+                    uint32_t q_frag_reg_load[4] = {0, 0, 0, 0};
+                    mma::ldmatrix_m8n8x4(q_frag_reg_load, smem_Q_ptr);
+                    uint32_t q_frag_reg[1] = {q_frag_reg_load[0]};
 
+                    // Load K fragment (int8, row-major in smem = col-major for B operand)
+                    int8_t* smem_K_ptr = smem_K + (k_start_warp + nk * MMA_QK_N_SM75 + lane_id % 8) * HEAD_DIM_PADDED_INT8 + hk * MMA_QK_K_SM75;
+                    uint32_t k_frag_reg_load[4] = {0, 0, 0, 0};
+                    mma::ldmatrix_m8n8x4(k_frag_reg_load, smem_K_ptr);
+                    uint32_t k_frag_reg[1] = {k_frag_reg_load[0]};
 
-                    // 2. Load K fragment (kB x nB) from smem_K into registers (Packed into uint32_t)
-                    //    m8n8k16 B operand: 4 x uint32_t (PTX: {%8, %9, %10, %11})
-                    uint32_t k_frag_reg[4] = {0,0,0,0}; // INT8 K fragment packed into 4 uint32
-                    // ... loading logic ...
-
-                    // 3. Perform MMA (m8n8k16)
-                    //    mma.m8n8k16(RS_accum, q_frag_reg, k_frag_reg) // Conceptual call
+                    // MMA m8n8k16 int8→int32
                     mma::mma_sync_m8n8k16_row_col_s8s8s32<mma::MMAMode::kInplaceUpdate>(RS_accum, q_frag_reg, k_frag_reg);
+                } // End hk loop (head_dim K dimension)
 
-                } // End K dimension loop
+                // --- Online Softmax (FlashAttention-style) ---
+                // Thread i: row r = lane_id % 8, cols c0 = nk*8 + (lane_id/8)*2, c1 = c0 + 1
+                uint32_t global_q_idx = q_start_row_block + q_start_warp + mq * MMA_QK_M_SM75 + (lane_id % 8);
+                uint32_t s_tile_start_col = k_start_row_block + k_start_warp + nk * MMA_QK_N_SM75;
+                uint32_t global_k_idx_0 = s_tile_start_col + (lane_id / 8) * 2;
+                uint32_t global_k_idx_1 = global_k_idx_0 + 1;
 
-                // --- Intermediate Processing (Softmax Prep) ---
-                // Process the accumulated RS_accum (int32) for the S tile fragment (mA x nB)
-                // This involves: Convert to float, apply scale, masking, find max, exp2, sum.
-                // The result (P fragment) should be stored in registers as FP16 (packed).
+                // Convert int32 → float, apply dequant scale
+                float s0 = __int2float_rn(RS_accum[0]) * current_dequant_scale;
+                float s1 = __int2float_rn(RS_accum[1]) * current_dequant_scale;
 
-                float s_frag_f32[NUM_QK_ACCUM * 2] = {0}; // 8 floats for softmax intermediates
-                uint32_t p_frag_reg[4] = {0,0,0,0};  // m16n8k8 A operand: 4 x FP16 packed as uint32 (PTX: {%4, %5, %6, %7})
-
-                // Convert int32 accumulators to float32
-                #pragma unroll
-                for(int acc_idx=0; acc_idx < NUM_QK_ACCUM; ++acc_idx) {
-                    // Example conversion (may need PTX intrinsics or careful casting)
-                    // s_frag_f32[acc_idx*2] = float(RS_accum[acc_idx] & 0xFFFF); // Hypothetical split
-                    // s_frag_f32[acc_idx*2+1] = float(RS_accum[acc_idx] >> 16);
-                    s_frag_f32[acc_idx] = __int2float_rz(RS_accum[acc_idx]); // More likely cast needed
-                 }
-
-
-                // Apply scale
-                #pragma unroll
-                for(int i=0; i < NUM_QK_ACCUM * 2; ++i) { // Adjust loop bound based on actual float count
-                    s_frag_f32[i] *= current_dequant_scale;
+                // Apply masking (Q boundary, K boundary, causal)
+                bool q_oob = (global_q_idx >= qo_len);
+                if (q_oob) { s0 = -1e30f; s1 = -1e30f; }
+                if (is_boundary_k_iter) {
+                    if (global_k_idx_0 >= kv_len) s0 = -1e30f;
+                    if (global_k_idx_1 >= kv_len) s1 = -1e30f;
+                }
+                if constexpr (mask_mode == MaskMode::kCausal) {
+                    if (global_k_idx_0 > global_q_idx) s0 = -1e30f;
+                    if (global_k_idx_1 > global_q_idx) s1 = -1e30f;
                 }
 
-                // Apply Masking (Causal & Boundary)
-                 uint32_t s_tile_start_row = q_start_row_block + q_start_warp + mq * MMA_QK_M_SM75;
-                 uint32_t s_tile_start_col = k_start_row_block + k_start_warp + nk * MMA_QK_N_SM75;
-                 // ... apply mask logic to s_frag_f32 based on global row/col indices and thread position ...
-                 #pragma unroll
-                 for (int row_idx_local = 0; row_idx_local < MMA_QK_M_SM75; ++row_idx_local) { // Iterate through elements this thread calculates
-                     #pragma unroll
-                     for (int col_idx_local = 0; col_idx_local < MMA_QK_N_SM75; ++col_idx_local) {
-                         uint32_t global_q_idx = s_tile_start_row + row_idx_local; // Simplified - needs thread mapping
-                         uint32_t global_k_idx = s_tile_start_col + col_idx_local; // Simplified - needs thread mapping
-                         bool is_masked = false;
-                         if (global_q_idx < qo_len) { // Check Q boundary first
-                              if (is_boundary_k_iter && global_k_idx >= kv_len) {
-                                  is_masked = true; // K boundary check
-                              } else if (mask_mode == MaskMode::kCausal && global_k_idx > global_q_idx) {
-                                  is_masked = true; // Causal check
-                              }
-                         } else {
-                             is_masked = true; // Q boundary check (mask out rows entirely)
-                         }
+                // 1. Local max of 2 values for this thread's row (dequantized only)
+                float m_local = fmaxf(s0, s1);
 
-                         if (is_masked) {
-                             // Apply masking to the corresponding element in s_frag_f32
-                             // Example: s_frag_f32[...] = -INFINITY;
-                         }
-                     }
-                 }
+                // 2. Scale max by sm_scale (includes log2e) before warp reduce
+                //    Per SM80 pattern: max_i(s_i) * sm_scale = max_i(s_i * sm_scale)
+                m_local *= sm_scale;
 
+                // 3. Warp-reduce max across 4 threads sharing the same row
+                //    Threads {r, r+8, r+16, r+24} share row r = lane_id % 8
+                m_local = fmaxf(m_local, __shfl_xor_sync(0xffffffff, m_local, 8));
+                m_local = fmaxf(m_local, __shfl_xor_sync(0xffffffff, m_local, 16));
 
-                // Update m_i, l_i, acc (Softmax Calculation) - Operates Per-Row
-                // This needs to map the S fragment elements to the correct m_i/l_i/acc registers
-                // ... complex softmax update logic adapted from SM80, using s_frag_f32 ...
-                // 1. Find max_k(S_ij) for this fragment -> m_ij_frag
-                // 2. Update global max m_i = max(m_i, m_ij_frag) across threads in the row (warp shuffle)
-                // 3. Calculate P_ij = exp2(S_ij * sm_scale - m_i)
-                // 4. Calculate sum_k(P_ij) -> l_ij_frag
-                // 5. Update global sum l_i = l_i * exp2(old_m_i - m_i) + l_ij_frag (warp shuffle)
-                // 6. Scale existing acc = acc * exp2(old_m_i - m_i)
+                // 4. Update online softmax state for this row (mq sub-tile)
+                float m_prev = m_i[mq];
+                float m_new = fmaxf(m_prev, m_local);
+                m_i[mq] = m_new;
 
-                // Pack P fragment into FP16 registers (p_frag_reg)
+                // 5. Renormalize: o_scale = exp2(m_prev - m_new)
+                float o_scale = math::ptx_exp2(m_prev - m_new);
+                l_i[mq] *= o_scale;
+
+                // Renormalize PV accumulators for this mq sub-tile
                 #pragma unroll
-                for(int i=0; i < NUM_QK_ACCUM; ++i) { // Adjust loop bound based on actual float count
-                     half2 p_half2 = __float22half2_rn(make_float2(s_frag_f32[i*2], s_frag_f32[i*2+1])); // Example
-                     // Pack half2 into uint32_t
-                     // p_frag_reg[i] = __half2_as_ushort(p_half2.x) | (__half2_as_ushort(p_half2.y) << 16); // Check packing order
-                     ((half2*)&p_frag_reg[i])[0] = p_half2;
+                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+                    RO_accum[mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2 + 0] *= o_scale;
+                    RO_accum[mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2 + 1] *= o_scale;
                 }
 
-                // --- PV Computation (using FP16 MMA) ---
-                 #pragma unroll
-                 for(int hk = 0; hk < head_dim / MMA_SV_K_SM75; ++hk) { // Iterate over K dim for PV
-                     // Load V fragment (kA x nB) from smem_V into registers (Packed into uint32_t)
-                     //    m16n8k8 B operand: 2 x uint32_t (PTX: {%8, %9})
-                     uint32_t v_frag_reg[2] = {0,0}; // FP16 V fragment packed into 2 uint32
-                     // TODO: Implement ldmatrix_m8n8x2 loading from smem_V
+                // 6. Compute P = exp2(S * sm_scale - m_new) (attention weights)
+                //    sm_scale already includes log2e; fmaf: s0*sm_scale + (-m_new)
+                float p0 = math::ptx_exp2(fmaf(s0, sm_scale, -m_new));
+                float p1 = math::ptx_exp2(fmaf(s1, sm_scale, -m_new));
+                if (s0 <= -1e29f) p0 = 0.0f;
+                if (s1 <= -1e29f) p1 = 0.0f;
 
-                     // Perform MMA (m16n8k8)
-                     // mma.m16n8k8(RO_accum, p_frag_reg, v_frag_reg) // Conceptual
-                     // Note: p_frag_reg needs to match the shape expectation (mA x kA) for m16n8k8
-                     mma::mma_sync_m16n8k8_row_col_f16f16f32<mma::MMAMode::kInplaceUpdate>(RO_accum, p_frag_reg, v_frag_reg);
+                // 7. Accumulate denominator l_i across the row
+                float l_local = p0 + p1;
+                l_local += __shfl_xor_sync(0xffffffff, l_local, 8);
+                l_local += __shfl_xor_sync(0xffffffff, l_local, 16);
+                l_i[mq] += l_local;
 
-                 } // End K dimension loop (PV)
+                // 8. Store P to shared memory, then reload via ldmatrix for correct
+                //    thread→data distribution in PV MMA m8n8k16 (A=1 register/thread).
+                //    Thread i writes to row r = lane_id % 8, cols c0 = (i/8)*2, c1 = c0+1.
+                half* smem_P_warp = smem_P + warp_id_in_block * P_TILE_ELEMS;
+                uint32_t r = lane_id % 8;
+                smem_P_warp[r * MMA_QK_N_SM75 + (lane_id / 8) * 2 + 0] = __float2half_rn(p0);
+                smem_P_warp[r * MMA_QK_N_SM75 + (lane_id / 8) * 2 + 1] = __float2half_rn(p1);
+                __syncwarp(); // Ensure all 32 threads finished writing before ldmatrix
 
-             } // End N dim loop (S tile)
-         } // End M dim loop (S tile)
+                // Load P via ldmatrix (x4, 8 threads, take R[0] for m8n8k16 A operand)
+                half* smem_P_row_ptr = smem_P_warp + r * MMA_QK_N_SM75;
+                uint32_t p_frag_reg_load[4] = {0, 0, 0, 0};
+                mma::ldmatrix_m8n8x4(p_frag_reg_load, smem_P_row_ptr);
+                uint32_t p_frag_reg[1] = {p_frag_reg_load[0]};
+
+                // --- PV Computation (FP16 MMA m8n8k16): RO += P × V ---
+                #pragma unroll
+                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+                    // Load V fragment: rows = nk*8 (K-tile rows), cols = fk*8 (V columns)
+                    half* smem_V_ptr = smem_V + (k_start_warp + nk * MMA_QK_N_SM75 + lane_id % 8) * HEAD_DIM_PADDED_FP16 + fk * MMA_SV_N_SM75;
+                    uint32_t v_frag_reg_load[4] = {0, 0, 0, 0};
+                    mma::ldmatrix_m8n8x4_trans(v_frag_reg_load, smem_V_ptr);
+                    uint32_t v_frag_reg[1] = {v_frag_reg_load[0]};
+
+                    // PV MMA: RO_accum[mq][fk*2..fk*2+1] += P × V[fk]
+                    mma::mma_sync_m8n8k16_row_col_f16f16f32<mma::MMAMode::kInplaceUpdate>(
+                        RO_accum + mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2,
+                        p_frag_reg,
+                        v_frag_reg);
+                } // End fk loop (V column sub-tiles)
+            } // End nk loop (S tile N dimension)
+        } // End mq loop (S tile M dimension)
         __syncthreads(); // Sync after finishing work with current K/V tile before loading next
     } // End K tile loop
 
-    // --- Final Normalization & Output ---
-    // Normalize RO_accum using final l_i
+    // --- Final Normalization ---
+    // Normalize: O[mq] = RO_accum[mq][*] / l_i[mq]. l_i already warp-reduced.
     #pragma unroll
-    for(int i=0; i < NUM_PV_ACCUM; ++i) {
-        // Need to aggregate l_i across threads in the row first (warp shuffle)
-        // float final_l_i = warpReduceSum(l_i[i]); // Conceptual reduction
-        // RO_accum[i] /= final_l_i;
-        // Simplified: Assume l_i[i] holds the correct sum for the elements this thread calculated
-        if (l_i[i] > 0.0f) { // Avoid division by zero
-             RO_accum[i] /= l_i[i];
-        } else {
-             RO_accum[i] = 0.0f; // Handle case where sum is zero or negative (due to masking?)
+    for(int mq = 0; mq < NUM_M_TILES; ++mq) {
+        float l_rcp = (l_i[mq] > 0.0f) ? math::ptx_rcp(l_i[mq]) : 0.0f;
+        #pragma unroll
+        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+            RO_accum[mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2 + 0] *= l_rcp;
+            RO_accum[mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2 + 1] *= l_rcp;
         }
     }
 
-    // Store Output tile
-    // Map RO_accum registers back to global memory
-    // Each thread writes its portion of the output tile
-    // ... Store logic mapping RO_accum to O_ptr ...
-     uint32_t o_start_row_global = q_start_row_block + warp_idx_q * WARP_Q;
-     #pragma unroll
-     for (int i = 0; i < NUM_PV_ACCUM; ++i) {
-         // Determine the global row and column this accumulator corresponds to
-         // This mapping is complex and depends on thread <-> MMA output element mapping
-         uint32_t out_row_global = 0; // = o_start_row_global + ...
-         uint32_t out_col = 0;        // = ...
+    // --- Output: Direct Write or smem_O Staging ---
+    uint32_t o_start_row_warp = warp_idx_q * WARP_Q;
+    if constexpr (USE_SMEM_O_OUTPUT) {
+        // Path A: Stage to smem_O → __syncthreads() → coalesced write to global
+        #pragma unroll
+        for(int mq = 0; mq < NUM_M_TILES; ++mq) {
+            uint32_t local_row = mq * MMA_SV_M_SM75 + (lane_id % 8);
+            uint32_t smem_row = o_start_row_warp + local_row;
+            #pragma unroll
+            for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+                uint32_t col0 = fk * MMA_SV_N_SM75 + (lane_id / 8) * 2;
+                uint32_t col1 = col0 + 1;
+                smem_O[smem_row * head_dim + col0] = __float2half_rn(RO_accum[mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2 + 0]);
+                smem_O[smem_row * head_dim + col1] = __float2half_rn(RO_accum[mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2 + 1]);
+            }
+        }
+        __syncthreads(); // All warps finished writing smem_O
 
-         if (out_row_global < qo_len) {
-             uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + out_row_global * stride_seq_o + out_col;
-             // Convert FP32 accumulator to DTypeOut (FP16)
-             O[o_offset] = __float2half_rn(RO_accum[i]); // Assuming DTypeOut is half
-         }
-     }
+        // Coalesced write: each thread reads a contiguous chunk from smem_O
+        for (int i = threadIdx.x; i < CTA_Q * head_dim; i += blockDim.x) {
+            uint32_t local_row = i / head_dim;
+            uint32_t local_col = i % head_dim;
+            uint32_t global_row = q_start_row_block + local_row;
+            if (global_row < qo_len) {
+                uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row * stride_seq_o + local_col;
+                O[o_offset] = smem_O[local_row * head_dim + local_col];
+            }
+        }
+    } else {
+        // Path B: Direct scattered write from threads to global O
+        #pragma unroll
+        for(int mq = 0; mq < NUM_M_TILES; ++mq) {
+            uint32_t global_row = q_start_row_block + o_start_row_warp + mq * MMA_SV_M_SM75 + (lane_id % 8);
+            if (global_row < qo_len) {
+                #pragma unroll
+                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+                    uint32_t col0 = fk * MMA_SV_N_SM75 + (lane_id / 8) * 2;
+                    uint32_t col1 = col0 + 1;
+                    uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row * stride_seq_o;
+                    O[o_offset + col0] = __float2half_rn(RO_accum[mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2 + 0]);
+                    O[o_offset + col1] = __float2half_rn(RO_accum[mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2 + 1]);
+                }
+            }
+        }
+    }
 
-
-    // Store LSE if needed
+    // --- Store LSE if needed ---
+    // Each row's LSE is computed from m_i[mq] and l_i[mq]. 4 threads share the same
+    // row — only threads with lane_id < 8 write (one value per unique row).
     if constexpr (return_lse) {
-        // Map m_i and l_i registers back to global LSE tensor
-        // Aggregate m_i and l_i across threads first
-        // ... Store LSE logic ...
          #pragma unroll
-         for (int i = 0; i < NUM_PV_ACCUM; ++i) {
-            // float final_m_i = warpReduceMax(m_i[i]); // Conceptual
-            // float final_l_i = warpReduceSum(l_i[i]); // Conceptual
-
-            // Calculate LSE for the row fragment this thread is responsible for
-            float lse_val = (l_i[i] > 0.f) ? (math::ptx_log2(l_i[i]) + m_i[i]) / math::log2e : -INFINITY; // Convert log2 to ln
-
-            // Determine global row index corresponding to m_i[i]/l_i[i]
-            uint32_t lse_row_global = 0; // = o_start_row_global + ...
-
-            // Store LSE value (potentially needs atomic add or reduction if multiple threads write to same LSE row)
-            // Simplified: Assume one thread per row for LSE store after reduction
-             if (lse_row_global < qo_len /* && thread_is_row_master */ ) {
-                 uint32_t lse_offset = batch_id * (qo_len * num_qo_heads) + head_id * qo_len + lse_row_global;
-                 Lse[lse_offset] = lse_val;
-             }
+         for (int mq = 0; mq < NUM_M_TILES; ++mq) {
+            if (lane_id < 8) {
+                float lse_val = (l_i[mq] > 0.f) ? (math::ptx_log2(l_i[mq]) + m_i[mq]) / math::log2e : -1e30f;
+                uint32_t lse_row_global = q_start_row_block + o_start_row_warp + mq * MMA_SV_M_SM75 + lane_id;
+                if (lse_row_global < qo_len) {
+                    uint32_t lse_offset = batch_id * (qo_len * num_qo_heads) + head_id * qo_len + lse_row_global;
+                    Lse[lse_offset] = lse_val;
+                }
+            }
          }
     }
 }
@@ -488,7 +543,7 @@ torch::Tensor qk_int8_sv_f16_accum_f32_attn_sm75(
               constexpr int CTA_Q_SM75 = 64; // Example, smaller CTA might be better for SM75
               constexpr int CTA_K_SM75 = 64;
               constexpr int WARP_Q_SM75 = 16; // Example
-              constexpr int WARP_K_SM75 = 32; // Example
+              constexpr int WARP_K_SM75 = 16; // WARP_K=16 gives 2 N-sub-tiles (16/MMA_SV_N=2), fits NUM_PV_ACCUM=4
 
               constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
 
@@ -511,11 +566,12 @@ torch::Tensor qk_int8_sv_f16_accum_f32_attn_sm75(
               constexpr uint32_t HEAD_DIM_PADDED_INT8_WRAP = HEAD_DIM + (SHMEM_PADDING_BYTES_WRAP / sizeof(int8_t));
               constexpr uint32_t HEAD_DIM_PADDED_FP16_WRAP = HEAD_DIM + (SHMEM_PADDING_BYTES_WRAP / sizeof(half));
 
+              constexpr int P_TILE_ELEMS_WRAP = 8 * 8; // MMA_QK_M × MMA_QK_N = 64 halfs per warp
+              constexpr int NUM_WARPS_WRAP = (CTA_Q_SM75 / WARP_Q_SM75) * (CTA_K_SM75 / WARP_K_SM75);
               size_t smem_size = CTA_Q_SM75 * HEAD_DIM_PADDED_INT8_WRAP * sizeof(int8_t) +
                                  CTA_K_SM75 * HEAD_DIM_PADDED_INT8_WRAP * sizeof(int8_t) +
-                                 CTA_K_SM75 * HEAD_DIM_PADDED_FP16_WRAP * sizeof(half);
-             // size_t smem_o_size = (size_t)CTA_Q_SM75 * HEAD_DIM * sizeof(half); // If using shared mem for output
-             // smem_size = std::max(smem_size, smem_o_size);
+                                 CTA_K_SM75 * HEAD_DIM_PADDED_FP16_WRAP * sizeof(half) +
+                                 NUM_WARPS_WRAP * P_TILE_ELEMS_WRAP * sizeof(half);  // per-warp P buffer
 
               auto kernel_func = qk_int8_sv_f16_accum_f32_attn_kernel_sm75<
                                       CTA_Q_SM75, CTA_K_SM75, WARP_Q_SM75, WARP_K_SM75, HEAD_DIM,
@@ -551,10 +607,164 @@ torch::Tensor qk_int8_sv_f16_accum_f32_attn_sm75(
     return lse;
 }
 
+// --- SM75 with smem_O staging variant ---
+torch::Tensor qk_int8_sv_f16_accum_f32_attn_sm75_smem_o(
+                    torch::Tensor query,
+                    torch::Tensor key,
+                    torch::Tensor value,
+                    torch::Tensor output,
+                    torch::Tensor query_scale,
+                    torch::Tensor key_scale,
+                    int tensor_layout,
+                    int is_causal,
+                    int qk_quant_gran,
+                    float sm_scale,
+                    int return_lse)
+{
+    // --- Input Checks (identical to base variant) ---
+    CHECK_CUDA(query); CHECK_CUDA(key); CHECK_CUDA(value); CHECK_CUDA(output); CHECK_CUDA(query_scale); CHECK_CUDA(key_scale);
+    CHECK_CONTIGUOUS(query); CHECK_CONTIGUOUS(key);
+    CHECK_LASTDIM_CONTIGUOUS(value); CHECK_LASTDIM_CONTIGUOUS(output);
+    CHECK_CONTIGUOUS(query_scale); CHECK_CONTIGUOUS(key_scale);
+    CHECK_DTYPE(query, torch::kInt8);
+    CHECK_DTYPE(key, torch::kInt8);
+    CHECK_DTYPE(value, torch::kHalf);
+    CHECK_DTYPE(query_scale, torch::kFloat32);
+    CHECK_DTYPE(key_scale, torch::kFloat32);
+    TORCH_CHECK(output.scalar_type() == torch::kHalf, "SM75 kernel currently only supports FP16 output.");
+    CHECK_DIMS(query, 4); CHECK_DIMS(key, 4); CHECK_DIMS(value, 4); CHECK_DIMS(output, 4);
+    CHECK_DIMS(query_scale, 3); CHECK_DIMS(key_scale, 3);
+
+    const int head_dim = query.size(3);
+    const int batch_size = query.size(0);
+    int stride_bz_q = query.stride(0);
+    int stride_bz_k = key.stride(0);
+    int stride_bz_v = value.stride(0);
+    int stride_bz_o = output.stride(0);
+    int qo_len, kv_len, num_qo_heads, num_kv_heads;
+    int stride_seq_q, stride_h_q, stride_seq_k, stride_h_k;
+    int stride_seq_v, stride_h_v;
+    int stride_seq_o, stride_h_o;
+
+    if (tensor_layout == 0) // NHD
+    {
+        qo_len = query.size(1); kv_len = key.size(1);
+        num_qo_heads = query.size(2); num_kv_heads = key.size(2);
+        stride_seq_q = query.stride(1); stride_h_q = query.stride(2);
+        stride_seq_k = key.stride(1); stride_h_k = key.stride(2);
+        stride_seq_v = value.stride(1); stride_h_v = value.stride(2);
+        stride_seq_o = output.stride(1); stride_h_o = output.stride(2);
+        CHECK_SHAPE(key, batch_size, kv_len, num_kv_heads, head_dim);
+        CHECK_SHAPE(value, batch_size, kv_len, num_kv_heads, head_dim);
+        CHECK_SHAPE(output, batch_size, qo_len, num_qo_heads, head_dim);
+    }
+    else // HND
+    {
+        qo_len = query.size(2); kv_len = key.size(2);
+        num_qo_heads = query.size(1); num_kv_heads = key.size(1);
+        stride_seq_q = query.stride(2); stride_h_q = query.stride(1);
+        stride_seq_k = key.stride(2); stride_h_k = key.stride(1);
+        stride_seq_v = value.stride(2); stride_h_v = value.stride(1);
+        stride_seq_o = output.stride(2); stride_h_o = output.stride(1);
+        CHECK_SHAPE(key, batch_size, num_kv_heads, kv_len, head_dim);
+        CHECK_SHAPE(value, batch_size, num_kv_heads, kv_len, head_dim);
+        CHECK_SHAPE(output, batch_size, num_qo_heads, qo_len, head_dim);
+    }
+
+    if (num_qo_heads % num_kv_heads != 0) {
+      std::ostringstream err_msg;
+      err_msg << "num_qo_heads (" << num_qo_heads << ") must be divisible by num_kv_heads (" << num_kv_heads << ")";
+      throw std::invalid_argument(err_msg.str());
+    }
+    const int num_kv_groups = num_qo_heads / num_kv_heads;
+
+    torch::Tensor lse = torch::empty({0});
+    if (return_lse) {
+      lse = torch::empty({batch_size, num_qo_heads, qo_len}, query.options().dtype(torch::kFloat32));
+    }
+
+    // --- Dispatch with USE_SMEM_O_OUTPUT = true ---
+    DISPATCH_HEAD_DIM(head_dim, HEAD_DIM, {
+      DISPATCH_CAUSAL(is_causal, IS_CAUSAL, {
+        DISPATCH_QK_QUANT_GRAN(qk_quant_gran, QK_QUANT_GRAN, {
+          DISPATCH_RETURN_LSE(return_lse, RETURN_LSE, {
+            using DTypeOut = half;
+              constexpr int CTA_Q_SM75 = 64;
+              constexpr int CTA_K_SM75 = 64;
+              constexpr int WARP_Q_SM75 = 16;
+              constexpr int WARP_K_SM75 = 16;
+              constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
+
+              // Shape checks (same as base)
+              if constexpr (QK_QUANT_GRAN == static_cast<int>(QuantGranularity::kPerWarp)) {
+                 CHECK_SHAPE(query_scale, batch_size, num_qo_heads, static_cast<long>(div_ceil(qo_len, CTA_Q_SM75) * (CTA_Q_SM75 / WARP_Q_SM75)));
+                 CHECK_SHAPE(key_scale, batch_size, num_kv_heads, static_cast<long>(div_ceil(kv_len, CTA_K_SM75) * (CTA_K_SM75 / WARP_K_SM75)));
+              } else if constexpr (QK_QUANT_GRAN == static_cast<int>(QuantGranularity::kPerThread)) {
+                 CHECK_SHAPE(query_scale, batch_size, num_qo_heads, static_cast<long>(div_ceil(qo_len, CTA_Q_SM75) * (CTA_Q_SM75 / WARP_Q_SM75) * 8));
+                 CHECK_SHAPE(key_scale, batch_size, num_kv_heads, static_cast<long>(div_ceil(kv_len, CTA_K_SM75) * (CTA_K_SM75 / WARP_K_SM75) * 4));
+              }
+
+              constexpr uint32_t SHMEM_PADDING_BYTES_WRAP = 16;
+              constexpr uint32_t HEAD_DIM_PADDED_INT8_WRAP = HEAD_DIM + (SHMEM_PADDING_BYTES_WRAP / sizeof(int8_t));
+              constexpr uint32_t HEAD_DIM_PADDED_FP16_WRAP = HEAD_DIM + (SHMEM_PADDING_BYTES_WRAP / sizeof(half));
+              constexpr int P_TILE_ELEMS_WRAP = 8 * 8;
+              constexpr int NUM_WARPS_WRAP = (CTA_Q_SM75 / WARP_Q_SM75) * (CTA_K_SM75 / WARP_K_SM75);
+              // smem_O adds CTA_Q × head_dim halfs for output staging
+              size_t smem_size = CTA_Q_SM75 * HEAD_DIM_PADDED_INT8_WRAP * sizeof(int8_t) +
+                                 CTA_K_SM75 * HEAD_DIM_PADDED_INT8_WRAP * sizeof(int8_t) +
+                                 CTA_K_SM75 * HEAD_DIM_PADDED_FP16_WRAP * sizeof(half) +
+                                 NUM_WARPS_WRAP * P_TILE_ELEMS_WRAP * sizeof(half) +
+                                 CTA_Q_SM75 * HEAD_DIM * sizeof(half);  // + smem_O
+
+              // USE_SMEM_O_OUTPUT = true
+              auto kernel_func = qk_int8_sv_f16_accum_f32_attn_kernel_sm75<
+                  CTA_Q_SM75, CTA_K_SM75, WARP_Q_SM75, WARP_K_SM75, HEAD_DIM,
+                  static_cast<QuantGranularity>(QK_QUANT_GRAN), static_cast<QuantGranularity>(QK_QUANT_GRAN),
+                  DTypeOut, mask_mode, RETURN_LSE, true>;  // USE_SMEM_O_OUTPUT=true
+
+              cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+              dim3 grid(div_ceil(qo_len, CTA_Q_SM75), num_qo_heads, batch_size);
+              int num_warps_in_block = (CTA_Q_SM75 / WARP_Q_SM75) * (CTA_K_SM75 / WARP_K_SM75);
+              dim3 block(32 * (num_warps_in_block > 0 ? num_warps_in_block : 1));
+
+              kernel_func<<<grid, block, smem_size>>>(
+                  query.data_ptr<int8_t>(), key.data_ptr<int8_t>(), reinterpret_cast<half*>(value.data_ptr()),
+                  reinterpret_cast<DTypeOut*>(output.data_ptr()), (RETURN_LSE) ? lse.data_ptr<float>() : nullptr,
+                  query_scale.data_ptr<float>(), key_scale.data_ptr<float>(),
+                  qo_len, kv_len, num_kv_groups,
+                  stride_bz_q, stride_seq_q, stride_h_q,
+                  stride_bz_k, stride_seq_k, stride_h_k,
+                  stride_bz_v, stride_seq_v, stride_h_v,
+                  stride_bz_o, stride_seq_o, stride_h_o,
+                  sm_scale
+              );
+              C10_CUDA_KERNEL_LAUNCH_CHECK();
+          });
+        });
+      });
+    });
+
+    return lse;
+}
+
 #endif  // __CUDACC__
 
 // Declaration for non-CUDA compilers (e.g. pybind11)
 torch::Tensor qk_int8_sv_f16_accum_f32_attn_sm75(
+                    torch::Tensor query,
+                    torch::Tensor key,
+                    torch::Tensor value,
+                    torch::Tensor output,
+                    torch::Tensor query_scale,
+                    torch::Tensor key_scale,
+                    int tensor_layout,
+                    int is_causal,
+                    int qk_quant_gran,
+                    float sm_scale,
+                    int return_lse);
+
+torch::Tensor qk_int8_sv_f16_accum_f32_attn_sm75_smem_o(
                     torch::Tensor query,
                     torch::Tensor key,
                     torch::Tensor value,
