@@ -297,7 +297,7 @@ setup(
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
     install_requires=[ # Add dependencies here if any are needed besides torch/triton
-        'torch>=2.0.0', # Example: Specify torch version if needed
+        'torch>=2.3.0', # SM75 requires PyTorch >= 2.3 (tested on 2.10.0 with CUDA 13.0)
         # 'triton>=...' # Specify Triton version if needed by Python code
     ],
 

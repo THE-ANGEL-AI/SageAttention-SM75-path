@@ -110,6 +110,8 @@ python test_sm75_kernel.py
 
 **Требования:** Python ≥3.9, PyTorch ≥2.3, CUDA ≥11.8, NVIDIA T4 (или другой SM75 GPU)
 
+> ✅ **Протестировано на Kaggle T4×2:** CUDA 13.0, PyTorch 2.10.0, TorchVision 0.25.0, TorchAudio 2.10.0 — [PyTorch cu130](https://download.pytorch.org/whl/cu130)
+
 ---
 
 ## 🔧 Быстрый старт
