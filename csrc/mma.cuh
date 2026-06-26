@@ -655,8 +655,12 @@ __device__ __forceinline__ void rowsum_f8f8f32(float* d, uint32_t* s) {
 
 // ===== SM75 (Turing) MMA wrappers =====
 // mma.sync.aligned.m8n8k32.row.col.s32.s8.s8.s32
+// NOTE: PTX requires D and C operands to be non-overlapping registers.
+// We use earlyclobber ("=&") to enforce disjoint output/input register allocation.
 template <MMAMode mma_mode = MMAMode::kInplaceUpdate>
 __device__ __forceinline__ void mma_sync_m8n8k32_row_col_s8s8s32(int32_t* C, uint32_t* A, uint32_t* B) {
+  // Use local temporaries for D output to guarantee no overlap with C input
+  int32_t C_out[4];
   if constexpr (mma_mode == MMAMode::kInplaceUpdate) {
     asm volatile(
         "mma.sync.aligned.m8n8k32.row.col.s32.s8.s8.s32 "
@@ -664,7 +668,7 @@ __device__ __forceinline__ void mma_sync_m8n8k32_row_col_s8s8s32(int32_t* C, uin
         "{%4, %5, %6, %7},"
         "{%8, %9},"
         "{%10, %11, %12, %13};\n"
-        : "=r"(C[0]), "=r"(C[1]), "=r"(C[2]), "=r"(C[3])
+        : "=r"(C_out[0]), "=r"(C_out[1]), "=r"(C_out[2]), "=r"(C_out[3])
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
           "r"(C[0]), "r"(C[1]), "r"(C[2]), "r"(C[3]));
   } else {
@@ -674,15 +678,19 @@ __device__ __forceinline__ void mma_sync_m8n8k32_row_col_s8s8s32(int32_t* C, uin
         "{%4, %5, %6, %7},"
         "{%8, %9},"
         "{%10, %11, %12, %13};\n"
-        : "=r"(C[0]), "=r"(C[1]), "=r"(C[2]), "=r"(C[3])
+        : "=r"(C_out[0]), "=r"(C_out[1]), "=r"(C_out[2]), "=r"(C_out[3])
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
           "r"(0), "r"(0), "r"(0), "r"(0));
   }
+  #pragma unroll
+  for (int _i = 0; _i < 4; _i++) C[_i] = C_out[_i];
 }
 
 // mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32
+// NOTE: PTX requires D and C operands to be non-overlapping registers.
 template <MMAMode mma_mode = MMAMode::kInplaceUpdate>
 __device__ __forceinline__ void mma_sync_m16n8k8_row_col_f16f16f32(float* C, uint32_t* A, uint32_t* B) {
+  float C_out[4];
   if constexpr (mma_mode == MMAMode::kInplaceUpdate) {
     asm volatile(
         "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
@@ -690,7 +698,7 @@ __device__ __forceinline__ void mma_sync_m16n8k8_row_col_f16f16f32(float* C, uin
         "{%4, %5, %6, %7},"
         "{%8, %9},"
         "{%10, %11, %12, %13};\n"
-        : "=f"(C[0]), "=f"(C[1]), "=f"(C[2]), "=f"(C[3])
+        : "=f"(C_out[0]), "=f"(C_out[1]), "=f"(C_out[2]), "=f"(C_out[3])
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
           "f"(C[0]), "f"(C[1]), "f"(C[2]), "f"(C[3]));
   } else {
@@ -700,10 +708,12 @@ __device__ __forceinline__ void mma_sync_m16n8k8_row_col_f16f16f32(float* C, uin
         "{%4, %5, %6, %7},"
         "{%8, %9},"
         "{%10, %11, %12, %13};\n"
-        : "=f"(C[0]), "=f"(C[1]), "=f"(C[2]), "=f"(C[3])
+        : "=f"(C_out[0]), "=f"(C_out[1]), "=f"(C_out[2]), "=f"(C_out[3])
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
           "f"(0.f), "f"(0.f), "f"(0.f), "f"(0.f));
   }
+  #pragma unroll
+  for (int _i = 0; _i < 4; _i++) C[_i] = C_out[_i];
 }
 // ===== END SM75 wrappers =====
 

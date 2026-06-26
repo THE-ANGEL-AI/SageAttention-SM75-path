@@ -221,13 +221,14 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 for(int hk = 0; hk < head_dim / MMA_QK_K_SM75; ++hk) { // Iterate over K dimension
                     // 1. Load Q fragment (mA x kA) from smem_Q into registers (Packed into uint32_t)
                     //    m8n8k32 A operand: 4 x uint32_t (PTX: {%4, %5, %6, %7})
-                    uint32_t q_frag_reg[4]; // INT8 Q fragment packed into 4 uint32
-                    // ... loading logic ...
+                    uint32_t q_frag_reg[4] = {0,0,0,0}; // INT8 Q fragment packed into 4 uint32
+                    // TODO: Implement ldmatrix_m8n8x4 loading from smem_Q
+                    // mma::ldmatrix_m8n8x4(q_frag_reg, smem_Q + (q_start_warp + mq * MMA_QK_M_SM75) * HEAD_DIM_PADDED_INT8 + hk * MMA_QK_K_SM75);
 
 
                     // 2. Load K fragment (kB x nB) from smem_K into registers (Packed into uint32_t)
                     //    m8n8k32 B operand: 2 x uint32_t (PTX: {%8, %9})
-                    uint32_t k_frag_reg[2]; // INT8 K fragment packed into 2 uint32
+                    uint32_t k_frag_reg[2] = {0,0}; // INT8 K fragment packed into 2 uint32
                     // ... loading logic ...
 
                     // 3. Perform MMA (m8n8k4)
@@ -241,7 +242,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 // This involves: Convert to float, apply scale, masking, find max, exp2, sum.
                 // The result (P fragment) should be stored in registers as FP16 (packed).
 
-                float s_frag_f32[NUM_QK_ACCUM * 2]; // 8 floats for softmax intermediates
+                float s_frag_f32[NUM_QK_ACCUM * 2] = {0}; // 8 floats for softmax intermediates
                 uint32_t p_frag_reg[4];  // m16n8k8 A operand: 4 x FP16 packed as uint32 (PTX: {%4, %5, %6, %7})
 
                 // Convert int32 accumulators to float32
@@ -313,8 +314,8 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                  for(int hk = 0; hk < head_dim / MMA_SV_K_SM75; ++hk) { // Iterate over K dim for PV
                      // Load V fragment (kA x nB) from smem_V into registers (Packed into uint32_t)
                      //    m16n8k8 B operand: 2 x uint32_t (PTX: {%8, %9})
-                     uint32_t v_frag_reg[2]; // FP16 V fragment packed into 2 uint32
-                     // ... loading logic ...
+                     uint32_t v_frag_reg[2] = {0,0}; // FP16 V fragment packed into 2 uint32
+                     // TODO: Implement ldmatrix_m8n8x2 loading from smem_V
 
                      // Perform MMA (m16n8k8)
                      // mma.m16n8k8(RO_accum, p_frag_reg, v_frag_reg) // Conceptual
@@ -352,8 +353,8 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
      for (int i = 0; i < NUM_PV_ACCUM; ++i) {
          // Determine the global row and column this accumulator corresponds to
          // This mapping is complex and depends on thread <-> MMA output element mapping
-         uint32_t out_row_global; // = o_start_row_global + ...
-         uint32_t out_col;        // = ...
+         uint32_t out_row_global = 0; // = o_start_row_global + ...
+         uint32_t out_col = 0;        // = ...
 
          if (out_row_global < qo_len) {
              uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + out_row_global * stride_seq_o + out_col;
@@ -377,7 +378,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
             float lse_val = (l_i[i] > 0.f) ? (math::ptx_log2(l_i[i]) + m_i[i]) / math::log2e : -INFINITY; // Convert log2 to ln
 
             // Determine global row index corresponding to m_i[i]/l_i[i]
-            uint32_t lse_row_global; // = o_start_row_global + ...
+            uint32_t lse_row_global = 0; // = o_start_row_global + ...
 
             // Store LSE value (potentially needs atomic add or reduction if multiple threads write to same LSE row)
             // Simplified: Assume one thread per row for LSE store after reduction
