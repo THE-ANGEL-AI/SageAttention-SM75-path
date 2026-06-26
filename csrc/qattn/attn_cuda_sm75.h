@@ -95,9 +95,8 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
 
     // --- Register Allocation ---
     // QK Accumulator (INT8 MMA -> INT32)
-    // Each thread handles a small part of the M*N tile. Size depends on MMA shape.
-    // Example: m8n8k4 => each thread needs 2 int32 accumulators? Need to check PTX guide. Assume 2.
-    constexpr int NUM_QK_ACCUM = 2; // Placeholder
+    // m8n8k32: each thread holds 4 int32 accumulators (PTX: {%0, %1, %2, %3})
+    constexpr int NUM_QK_ACCUM = 4;
     int32_t RS_accum[NUM_QK_ACCUM];
 
     // PV Accumulator (FP16 MMA -> FP32)
@@ -221,16 +220,14 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 #pragma unroll
                 for(int hk = 0; hk < head_dim / MMA_QK_K_SM75; ++hk) { // Iterate over K dimension
                     // 1. Load Q fragment (mA x kA) from smem_Q into registers (Packed into uint32_t)
-                    //    Indices: q_start_warp + mq*MMA_QK_M_SM75 + ... (thread-specific offset)
-                    //             hk*MMA_QK_K_SM75 + ... (thread-specific offset)
-                    uint32_t q_frag_reg; // Example register holding packed Q data
+                    //    m8n8k32 A operand: 4 x uint32_t (PTX: {%4, %5, %6, %7})
+                    uint32_t q_frag_reg[4]; // INT8 Q fragment packed into 4 uint32
                     // ... loading logic ...
 
 
                     // 2. Load K fragment (kB x nB) from smem_K into registers (Packed into uint32_t)
-                    //    Indices: k_start_warp + nk*MMA_QK_N_SM75 + ... (thread-specific offset)
-                    //             hk*MMA_QK_K_SM75 + ... (thread-specific offset)
-                    uint32_t k_frag_reg; // Example register holding packed K data
+                    //    m8n8k32 B operand: 2 x uint32_t (PTX: {%8, %9})
+                    uint32_t k_frag_reg[2]; // INT8 K fragment packed into 2 uint32
                     // ... loading logic ...
 
                     // 3. Perform MMA (m8n8k4)
@@ -244,8 +241,8 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 // This involves: Convert to float, apply scale, masking, find max, exp2, sum.
                 // The result (P fragment) should be stored in registers as FP16 (packed).
 
-                float s_frag_f32[NUM_QK_ACCUM * 2]; // Example: 2 floats per int32 accumulator? Check PTX
-                uint32_t p_frag_reg[NUM_QK_ACCUM];  // Example: Resulting P fragment (FP16 packed)
+                float s_frag_f32[NUM_QK_ACCUM * 2]; // 8 floats for softmax intermediates
+                uint32_t p_frag_reg[4];  // m16n8k8 A operand: 4 x FP16 packed as uint32 (PTX: {%4, %5, %6, %7})
 
                 // Convert int32 accumulators to float32
                 #pragma unroll
@@ -315,15 +312,14 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                  #pragma unroll
                  for(int hk = 0; hk < head_dim / MMA_SV_K_SM75; ++hk) { // Iterate over K dim for PV
                      // Load V fragment (kA x nB) from smem_V into registers (Packed into uint32_t)
-                     // Indices: k_start_warp + nk*MMA_SV_N_SM75 + ...
-                     //          hk*MMA_SV_K_SM75 + ...
-                     uint32_t v_frag_reg; // Example: For m16n8k8, B operand is k8 x n8
+                     //    m16n8k8 B operand: 2 x uint32_t (PTX: {%8, %9})
+                     uint32_t v_frag_reg[2]; // FP16 V fragment packed into 2 uint32
                      // ... loading logic ...
 
                      // Perform MMA (m16n8k8)
                      // mma.m16n8k8(RO_accum, p_frag_reg, v_frag_reg) // Conceptual
                      // Note: p_frag_reg needs to match the shape expectation (mA x kA) for m16n8k8
-                     mma::mma_sync_m16n8k8_row_col_f16f16f32<mma::MMAMode::kInplaceUpdate>(RO_accum, p_frag_reg, &v_frag_reg); // Example call
+                     mma::mma_sync_m16n8k8_row_col_f16f16f32<mma::MMAMode::kInplaceUpdate>(RO_accum, p_frag_reg, v_frag_reg);
 
                  } // End K dimension loop (PV)
 
