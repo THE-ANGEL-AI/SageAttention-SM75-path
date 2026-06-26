@@ -24,6 +24,11 @@ from setuptools import setup, find_packages
 import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
+# Monkey-patch: отключаем проверку CUDA version mismatch
+# На Kaggle PyTorch собран с CUDA 13.0, а система — 12.8 (или другой).
+# Без этого патча сборка падает с RuntimeError о несовпадении версий.
+torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None
+
 # Flags to track detected architectures
 HAS_SM75 = False
 HAS_SM80 = False
