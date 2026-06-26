@@ -655,7 +655,7 @@ __device__ __forceinline__ void rowsum_f8f8f32(float* d, uint32_t* s) {
 
 // ===== SM75 (Turing) MMA wrappers =====
 // mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32
-// Valid for SM75+ int8 tensor cores: A=4×uint32, B=2×uint32, C/D=4×int32
+// Valid for SM75+ int8 tensor cores: A=4×uint32, B=4×uint32, C/D=4×int32
 // NOTE: m8n8k32 does NOT exist in PTX ISA. K=32 variants use m16n8k32 for SM80+.
 // NOTE: PTX requires D and C operands to be non-overlapping registers.
 // We use earlyclobber ("=&") to enforce disjoint output/input register allocation.
@@ -668,20 +668,20 @@ __device__ __forceinline__ void mma_sync_m8n8k16_row_col_s8s8s32(int32_t* C, uin
         "mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 "
         "{%0, %1, %2, %3},"
         "{%4, %5, %6, %7},"
-        "{%8, %9},"
-        "{%10, %11, %12, %13};\n"
+        "{%8, %9, %10, %11},"
+        "{%12, %13, %14, %15};\n"
         : "=&r"(C_out[0]), "=&r"(C_out[1]), "=&r"(C_out[2]), "=&r"(C_out[3])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
+        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]), "r"(B[2]), "r"(B[3]),
           "r"(C[0]), "r"(C[1]), "r"(C[2]), "r"(C[3]));
   } else {
     asm volatile(
         "mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 "
         "{%0, %1, %2, %3},"
         "{%4, %5, %6, %7},"
-        "{%8, %9},"
-        "{%10, %11, %12, %13};\n"
+        "{%8, %9, %10, %11},"
+        "{%12, %13, %14, %15};\n"
         : "=&r"(C_out[0]), "=&r"(C_out[1]), "=&r"(C_out[2]), "=&r"(C_out[3])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
+        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]), "r"(B[2]), "r"(B[3]),
           "r"(0), "r"(0), "r"(0), "r"(0));
   }
   #pragma unroll

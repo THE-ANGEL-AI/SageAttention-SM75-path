@@ -227,8 +227,8 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
 
 
                     // 2. Load K fragment (kB x nB) from smem_K into registers (Packed into uint32_t)
-                    //    m8n8k16 B operand: 2 x uint32_t (PTX: {%8, %9})
-                    uint32_t k_frag_reg[2] = {0,0}; // INT8 K fragment packed into 2 uint32
+                    //    m8n8k16 B operand: 4 x uint32_t (PTX: {%8, %9, %10, %11})
+                    uint32_t k_frag_reg[4] = {0,0,0,0}; // INT8 K fragment packed into 4 uint32
                     // ... loading logic ...
 
                     // 3. Perform MMA (m8n8k16)
