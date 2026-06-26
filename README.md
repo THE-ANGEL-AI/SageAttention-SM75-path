@@ -69,8 +69,32 @@
 
 | Файл | Назначение |
 |---|---|
+| [`comfyui_nodes/`](comfyui_nodes/) | **Custom Node** — установи в `ComfyUI/custom_nodes/sageattention_sm75/` |
 | `scripts/ltxv_sageattn_patch.py` | Monkey-patch `F.scaled_dot_product_attention` → SageAttention для LTX-Video |
 | `scripts/build_sm75_kaggle.sh` | Скрипт сборки для Kaggle T4×2 |
+
+#### Установка ноды в ComfyUI
+
+```bash
+# Скопируй папку comfyui_nodes/ в custom_nodes ComfyUI:
+cp -r comfyui_nodes/ /path/to/ComfyUI/custom_nodes/sageattention_sm75/
+
+# Перезапусти ComfyUI
+```
+
+После перезапуска в меню нод появится категория **🧠 SageAttention** с двумя нодами:
+
+| Нода | Где использовать |
+|---|---|
+| **🧠 SageAttention Apply (SM75 T4 INT8)** | Между загрузчиком модели и сэмплером. Параметры: `smooth_k` (on/off), `enable` (on/off) |
+| **🧠 SageAttention Remove** | Убирает патч, возвращает оригинальное внимание |
+
+**Схема workflow:**
+```
+[Load LTX Model] → [🧠 SageAttention Apply] → [LTX Sampler] → [VAE Decode] → [Output]
+```
+
+> Нода использует `model.add_object_patch()` — патч действует **только на эту модель**, не ломая другие части workflow.
 
 ---
 
