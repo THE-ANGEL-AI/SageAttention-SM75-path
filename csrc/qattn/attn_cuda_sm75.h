@@ -357,9 +357,8 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                     for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
                         // Load K=4 chunk of V (4 fp16 values per thread = 2 b32 registers)
                         half* smem_V_ptr = smem_V + (k_start_warp + nk * MMA_QK_N_SM75 + pv_k * MMA_SV_K_SM75 + lane_id % 8) * HEAD_DIM_PADDED_FP16 + fk * MMA_SV_N_SM75;
-                        uint32_t v_frag_reg_load[4] = {0, 0, 0, 0};
-                        mma::ldmatrix_m8n8x4_trans(v_frag_reg_load, smem_V_ptr);
-                        uint32_t v_frag_reg_k[2] = {v_frag_reg_load[0], v_frag_reg_load[1]};
+                        uint32_t v_frag_reg_k[2] = {0, 0};
+                        mma::ldmatrix_m8n8x2_trans(v_frag_reg_k, smem_V_ptr);
 
                         // PV MMA: RO_accum[mq][fk*2..fk*2+1] += P_chunk × V_chunk
                         mma::mma_sync_m8n8k4_row_col_f16f16f32<mma::MMAMode::kInplaceUpdate>(
