@@ -1,26 +1,22 @@
 """
-ComfyUI Custom Node: SageAttention SM75 (Turing T4 INT8 Attention)
+ComfyUI Custom Node: SageAttention-T4 (Turing SM75 INT8 Attention)
 
-Installing:
-  Copy the comfyui_nodes/ folder into ComfyUI/custom_nodes/sageattention_sm75/
+Автор: THEANGELAI
+Репозиторий: https://github.com/THE-ANGEL-AI/SageAttention-SM75-path
 
-After restart, find nodes in menu: SageAttention
+Авто-установка:
+  Клонируйте репо в ComfyUI/custom_nodes/SageAttention-T4/
+  → pip install -e . → перезапустите ComfyUI
+  → нода появится автоматически (bridge: sageattn_t4_nodes.py)
 
-Provides:
-  - SageAttention Apply (SM75)  — applies INT8 attention to MODEL
-  - SageAttention Remove        — restores original attention
+Ноды:
+  - SageAttention-T4 Apply (INT8 Turbo)  — ускоряет attention модели в ~2×
+  - SageAttention-T4 Remove             — восстанавливает оригинальное внимание
+
+NOTE: NODE_CLASS_MAPPINGS lives in root sageattn_t4_nodes.py for auto-discovery.
+This __init__.py exports only the node classes for direct import.
 """
 
 from .sageattention_node import SageAttentionNode, SageAttentionRemoveNode
 
-NODE_CLASS_MAPPINGS = {
-    "SageAttentionApply": SageAttentionNode,
-    "SageAttentionRemove": SageAttentionRemoveNode,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "SageAttentionApply": "🧠 SageAttention Apply (SM75 T4 INT8)",
-    "SageAttentionRemove": "🧠 SageAttention Remove",
-}
-
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["SageAttentionNode", "SageAttentionRemoveNode"]

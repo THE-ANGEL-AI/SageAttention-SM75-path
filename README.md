@@ -69,32 +69,38 @@
 
 | Файл | Назначение |
 |---|---|
-| [`comfyui_nodes/`](comfyui_nodes/) | **Custom Node** — установи в `ComfyUI/custom_nodes/sageattention_sm75/` |
+| [`comfyui_nodes/`](comfyui_nodes/) | **Custom Node** — авто-установка через клонирование репо |
+| `sageattn_t4_nodes.py` | Bridge-файл для авто-обнаружения ComfyUI (в корне репо) |
 | `scripts/ltxv_sageattn_patch.py` | Monkey-patch `F.scaled_dot_product_attention` → SageAttention для LTX-Video |
 | `scripts/build_sm75_kaggle.sh` | Скрипт сборки для Kaggle T4×2 |
 
-#### Установка ноды в ComfyUI
+#### Авто-установка ноды в ComfyUI
 
 ```bash
-# Скопируй папку comfyui_nodes/ в custom_nodes ComfyUI:
-cp -r comfyui_nodes/ /path/to/ComfyUI/custom_nodes/sageattention_sm75/
+# Клонируй репо ПРЯМО в custom_nodes (НЕ копируй подпапку!):
+cd ComfyUI/custom_nodes/
+git clone https://github.com/THE-ANGEL-AI/SageAttention-SM75-path.git SageAttention-T4
+cd SageAttention-T4
+
+# Собери CUDA-кернелы под T4:
+pip install -e .
 
 # Перезапусти ComfyUI
 ```
 
-После перезапуска в меню нод появится категория **🧠 SageAttention** с двумя нодами:
+После перезапуска в меню нод появится категория **🧠 SageAttention-T4** с двумя нодами:
 
 | Нода | Где использовать |
 |---|---|
-| **🧠 SageAttention Apply (SM75 T4 INT8)** | Между загрузчиком модели и сэмплером. Параметры: `smooth_k` (on/off), `enable` (on/off) |
-| **🧠 SageAttention Remove** | Убирает патч, возвращает оригинальное внимание |
+| **🧠 SageAttention-T4 Apply (INT8 Turbo)** | Между загрузчиком модели и сэмплером. Параметры: `smooth_k` (on/off), `enable` (on/off) |
+| **🧠 SageAttention-T4 Remove** | Убирает патч, возвращает оригинальное внимание |
 
 **Схема workflow:**
 ```
-[Load LTX Model] → [🧠 SageAttention Apply] → [LTX Sampler] → [VAE Decode] → [Output]
+[Load LTX Model] → [🧠 SageAttention-T4 Apply] → [LTX Sampler] → [VAE Decode] → [Output]
 ```
 
-> Нода использует `model.add_object_patch()` — патч действует **только на эту модель**, не ломая другие части workflow.
+> Нода использует `model.add_object_patch()` — патч действует **только на эту модель**, не ломая другие части workflow. Никаких глобальных monkey-patch'ей.
 
 ---
 

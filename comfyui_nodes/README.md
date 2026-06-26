@@ -1,60 +1,68 @@
-# ComfyUI Custom Node: SageAttention SM75 (T4)
+# 🧠 SageAttention-T4 — ComfyUI Custom Node
 
-Ускорение attention в 2× для NVIDIA T4 через INT8 тензорные ядра.
+**Автор:** THEANGELAI  
+**Репозиторий:** https://github.com/THE-ANGEL-AI/SageAttention-SM75-path  
 
-## Установка
+Ускорение attention в ~2× для NVIDIA T4 (Turing SM75) через INT8 тензорные ядра.
 
-Скопируйте папку `comfyui_nodes/` в `ComfyUI/custom_nodes/sageattention_sm75/`:
+---
+
+## ⚡ Авто-установка
+
+Клонируйте репо **прямо в custom_nodes** — нода появится автоматически после перезапуска ComfyUI:
 
 ```bash
-# Из корня проекта
-cp -r comfyui_nodes/ /path/to/ComfyUI/custom_nodes/sageattention_sm75/
-
-# Или через symlink (удобно для разработки):
-# Windows (cmd admin):
-mklink /D C:\ComfyUI\custom_nodes\sageattention_sm75 E:\Kaggle_Cloud\SageAttention-SM75-path\comfyui_nodes
-
-# Linux/macOS:
-ln -s /path/to/SageAttention-SM75-path/comfyui_nodes /path/to/ComfyUI/custom_nodes/sageattention_sm75
+cd ComfyUI/custom_nodes/
+git clone https://github.com/THE-ANGEL-AI/SageAttention-SM75-path.git SageAttention-T4
+cd SageAttention-T4
+pip install -e .
 ```
 
-**Требования:** SageAttention-SM75 должен быть установлен (`pip install -e .` из корня проекта).
+Перезапустите ComfyUI. В меню нод появится категория **🧠 SageAttention-T4**.
 
-## Использование
+> **Важно:** `pip install -e .` должен быть выполнен из папки `SageAttention-T4/` (внутри custom_nodes). Он соберёт CUDA-кернелы под вашу T4.
 
-После перезапуска ComfyUI в меню появится категория **SageAttention**:
+---
 
-### 🧠 SageAttention Apply (SM75 T4 INT8)
+## 📦 Ноды
 
-Вставьте эту ноду **между загрузчиком модели и сэмплером**:
+### 🧠 SageAttention-T4 Apply (INT8 Turbo)
+
+Вставьте **между загрузчиком модели и сэмплером**:
 
 ```
-[Load LTX Model] → [🧠 SageAttention Apply] → [LTX Sampler] → ...
+[Load Model] → [🧠 SageAttention-T4 Apply] → [Sampler] → [VAE] → ...
 ```
 
 **Параметры:**
+
 | Параметр | По умолчанию | Что делает |
 |---|---|---|
-| `model` | (вход) | Модель к которой применяется патч |
+| `model` | (вход) | Модель для патча |
 | `smooth_k` | True | Вычитает среднее K перед attention (точнее) |
-| `enable` | True | False = passthrough (без патча) |
+| `enable` | True | False = passthrough (без патча, модель как есть) |
 
-### 🧠 SageAttention Remove
+### 🧠 SageAttention-T4 Remove
 
-Убирает патч если нужно дальше использовать оригинальное внимание.
+Убирает патч, восстанавливая оригинальное `scaled_dot_product_attention`.
 
-## Как это работает
+---
 
-Нода использует `model.add_object_patch()` — безопасный способ ComfyUI:
-- Патч действует **только на эту модель** (не глобально)
-- Не ломает другие ноды в workflow
-- Авто-фолбек: custom маски / dropout / не-FP16 → оригинальное внимание
+## 🛡️ Безопасность
 
-## Проверка что работает
+- **Не глобальный monkey-patch** — используется `model.add_object_patch()`, действует только на модель прошедшую через ноду
+- **Авто-фолбек** — если attention вызван с маской, dropout > 0, или не-FP16 типом → прозрачно передаётся оригинальному `sdpa`
+- **Не ломает другие ноды** — другие части workflow не затронуты
 
-В консоли ComfyUI должно появиться:
+---
+
+## ✅ Проверка что работает
+
+В консоли ComfyUI (запущенной с `--verbose`) должно появиться:
+
 ```
-[SageAttention] ✓ Applied (smooth_k=True)
+[SageAttention] SageAttention imported successfully
+[SageAttention] SageAttention applied (smooth_k=True)
 ```
 
-А GPU-утилизация (nvidia-smi) должна показать активность тензорных ядер.
+В `nvidia-smi` GPU должна показывать высокую утилизацию compute (не копирование).

@@ -1,5 +1,18 @@
 [project]
-name = "sageattention-sm75-comfyui"
+name = "sageattention-t4"
 version = "1.0.0"
-description = "SageAttention SM75 INT8 attention for NVIDIA T4 (Turing) — ComfyUI custom node"
+description = "⚡ SageAttention-T4 — INT8 attention (2× ускорение) для NVIDIA T4/RTX 2080/Quadro RTX (Turing SM75)"
 requires-python = ">=3.9"
+authors = [
+    {name = "THEANGELAI", email = "300989sanek@gmail.com"},
+]
+license = "Apache-2.0"
+readme = "README.md"
+urls = {repository = "https://github.com/THE-ANGEL-AI/SageAttention-SM75-path"}
+
+[tool.comfyuimanager]
+title = "SageAttention-T4 (INT8 Attention for Turing GPU)"
+author = "THEANGELAI"
+description = "Ускоряет scaled_dot_product_attention в 2× на NVIDIA T4 через INT8 тензорные ядра. Безопасный патч через add_object_patch — только для выбранной модели. Авто-фолбек на оригинальное внимание для неподдерживаемых случаев (маски, dropout, не-FP16)."
+category = "attention"
+tags = ["attention", "t4", "turing", "int8", "optimization", "sageattention", "video"]

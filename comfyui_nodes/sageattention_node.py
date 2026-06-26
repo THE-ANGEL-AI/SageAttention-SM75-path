@@ -138,8 +138,8 @@ class SageAttentionNode:
     RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "apply_patch"
-    CATEGORY = "SageAttention"
-    DESCRIPTION = "Accelerates attention 2x on T4 via INT8 tensor cores. Auto-fallback for masks/non-FP16."
+    CATEGORY = "SageAttention-T4"
+    DESCRIPTION = "⚡ 2× attention on T4 via INT8 tensor cores. Safe: auto-fallback for masks/non-FP16."
 
     def apply_patch(self, model, smooth_k=True, enable=True):
         if not enable:
@@ -192,8 +192,8 @@ class SageAttentionRemoveNode:
     RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "remove_patch"
-    CATEGORY = "SageAttention"
-    DESCRIPTION = "Removes SageAttention patch — restores original scaled_dot_product_attention."
+    CATEGORY = "SageAttention-T4"
+    DESCRIPTION = "Removes SageAttention-T4 patch — restores original scaled_dot_product_attention."
 
     def remove_patch(self, model):
         m = model.clone()
