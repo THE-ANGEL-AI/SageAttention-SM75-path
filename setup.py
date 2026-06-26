@@ -27,7 +27,6 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 # Flags to track detected architectures
 HAS_SM75 = False
 HAS_SM80 = False
-HAS_SM75 = False
 HAS_SM86 = False
 HAS_SM89 = False
 HAS_SM90 = False
@@ -134,72 +133,48 @@ for capability in sorted(list(compute_capabilities)):
     arch_flag_base = f"{major}{minor}"
 
     # Architecture-specific CUDA version checks
-# Architecture-specific flags and checks
-arch_flags = []
-enable_bf16 = True # Enable by default, disable specifically for SM75
-
-for capability in sorted(list(compute_capabilities)):
-    major, minor = map(int, capability.split('.'))
-    arch_flag_base = f"{major}{minor}"
-
-    # Architecture-specific CUDA version checks
     if major == 7 and minor == 5:
         HAS_SM75 = True
         # SM75 should work with CUDA 11.8+, no higher requirement needed from base
         enable_bf16 = False # Turing does not support BF16
         arch_flags.append("-gencode")
-        arch_flags.append("arch=compute_75,code=sm_75")
+        arch_flags.append(f"arch=compute_75,code=sm_75")
     elif major == 8 and minor == 0:
         HAS_SM80 = True
         # SM80 requires CUDA 11.1+, covered by base 11.8
-        arch_flags.append("-gencode",`n        f"arch=compute_80,code=sm_80")
+        arch_flags.append("-gencode")
+        arch_flags.append(f"arch=compute_80,code=sm_80")
     elif major == 8 and minor == 6:
         HAS_SM86 = True
         # SM86 requires CUDA 11.1+, covered by base 11.8
-        arch_flags.append("-gencode",`n        f"arch=compute_86,code=sm_86")
+        arch_flags.append("-gencode")
+        arch_flags.append(f"arch=compute_86,code=sm_86")
     elif major == 8 and minor == 9:
         HAS_SM89 = True
         if nvcc_cuda_version < Version("12.0"): # FP8 MMA support added later, requires newer compiler
              # Relaxing slightly from 12.4, needs testing. Stricter check if issues arise.
              raise RuntimeError(f"Compute capability 8.9 requires CUDA 12.0 or higher (detected {nvcc_cuda_version}).")
-        arch_flags.append("-gencode",`n        f"arch=compute_89,code=sm_89")
+        arch_flags.append("-gencode")
+        arch_flags.append(f"arch=compute_89,code=sm_89")
     elif major == 9 and minor == 0:
         HAS_SM90 = True
         if nvcc_cuda_version < Version("12.0"): # WGMMA requires CUDA 12.0+
             raise RuntimeError(f"Compute capability 9.0 requires CUDA 12.0 or higher (detected {nvcc_cuda_version}).")
         # Use 90a for WGMMA
-        arch_flags.append("-gencode",`n        f"arch=compute_90,code=sm_90a")
+        arch_flags.append("-gencode")
+        arch_flags.append(f"arch=compute_90,code=sm_90a")
     # Placeholder for future Blackwell check (SM120 / compute_120 ?)
     # elif major == 12 and minor == 0:
     #     HAS_SM120 = True
     #     if nvcc_cuda_version < Version("12.8"): # Example requirement
     #         raise RuntimeError(f"Compute capability 12.0 requires CUDA 12.8 or higher (detected {nvcc_cuda_version}).")
-    #     arch_flags.append("-gencode",`n        f"arch=compute_120,code=sm_120a") # Hypothetical flag
+    #     arch_flags.append("-gencode")
+    #     arch_flags.append(f"arch=compute_120,code=sm_120a") # Hypothetical flag
     else:
         warnings.warn(f"Unhandled compute capability: {capability}. Skipping specific flags.")
         # Add generic PTX compilation for forward compatibility if desired
         # arch_flags.append(f"-gencode arch=compute_{arch_flag_base},code=compute_{arch_flag_base}")
 
-
-# Common flags setup
-CXX_FLAGS = COMMON_CXX_FLAGS[:]
-NVCC_FLAGS = COMMON_NVCC_FLAGS[:]
-
-# Add BF16 flag if needed by any selected architecture
-if enable_bf16:
-    CXX_FLAGS.append("-DENABLE_BF16")
-    NVCC_FLAGS.append("-DENABLE_BF16")
-else:
-    print("BF16 support disabled (SM75 detected or only SM75 specified).")
-
-
-# Add ABI flag
-ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
-CXX_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
-NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
-
-# Append architecture-specific flags
-NVCC_FLAGS.extend(arch_flags)
 
 # Common flags setup
 CXX_FLAGS = COMMON_CXX_FLAGS[:]
@@ -229,25 +204,7 @@ if HAS_SM75:
         name="sageattention._qattn_sm75",
         sources=[
             "csrc/qattn/pybind_sm75.cpp",
-            "csrc/qattn/qk_int_sv_f16_cuda_sm75.cu", # Needs to be created
-        ],
-        extra_compile_args={
-            "cxx": CXX_FLAGS,
-            "nvcc": NVCC_FLAGS,
-        },
-    )
-    ext_modules.append(qattn_sm75_extension)
-
-
-ext_modules = []
-
-# SM75 Kernel (INT8 QK, FP16 PV, FP32 Accum) - Only if SM75 is targeted
-if HAS_SM75:
-    qattn_sm75_extension = CUDAExtension(
-        name="sageattention._qattn_sm75",
-        sources=[
-            "csrc/qattn/pybind_sm75.cpp",
-            "csrc/qattn/qk_int_sv_f16_cuda_sm75.cu", # Needs to be created
+            "csrc/qattn/qk_int_sv_f16_cuda_sm75.cu",
         ],
         extra_compile_args={
             "cxx": CXX_FLAGS,
