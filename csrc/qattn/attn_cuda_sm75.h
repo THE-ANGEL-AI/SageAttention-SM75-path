@@ -19,6 +19,7 @@
 #include "../utils.cuh"
 #include <cuda_fp16.h>
 #include <torch/extension.h>
+#include <c10/cuda/CUDAException.h> // C10_CUDA_KERNEL_LAUNCH_CHECK
 
 #include "../mma.cuh" // Contains SM75 MMA wrappers now
 #include "../math.cuh"
@@ -33,7 +34,7 @@
 // SM75 MMA Shapes
 #define MMA_QK_M_SM75 8
 #define MMA_QK_N_SM75 8
-#define MMA_QK_K_SM75 4 // INT8 MMA K dim
+#define MMA_QK_K_SM75 32 // INT8 MMA K dim (m8n8k32 for Turing)
 
 #define MMA_SV_M_SM75 16
 #define MMA_SV_N_SM75 8
@@ -174,7 +175,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
             uint32_t k_row_global = k_start_row_block + k_row_local;
 
             int8_t k_val = 0;
-            half v_val = 0.0h; // Use half literal
+            half v_val = __float2half(0.0f);
             if (k_row_global < kv_len) { // Check global boundary
                 // Calculate global memory addresses
                 uint32_t k_offset = batch_id * stride_bz_k + kv_head_id * stride_h_k + k_row_global * stride_seq_k + k_col;
@@ -234,7 +235,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
 
                     // 3. Perform MMA (m8n8k4)
                     //    mma.m8n8k4(RS_accum, q_frag_reg, k_frag_reg) // Conceptual call
-                    mma::mma_sync_m8n8k4_row_col_s8s8s32<mma::MMAMode::kInplaceUpdate>(RS_accum, q_frag_reg, k_frag_reg);
+                    mma::mma_sync_m8n8k32_row_col_s8s8s32<mma::MMAMode::kInplaceUpdate>(RS_accum, q_frag_reg, k_frag_reg);
 
                 } // End K dimension loop
 
