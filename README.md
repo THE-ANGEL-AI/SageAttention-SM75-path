@@ -39,11 +39,12 @@
 
 | Компонент | Что сделано |
 |---|---|
-| **MMA-обёртки** (`csrc/mma.cuh`) | m8n8k16 INT8 + FP16 для SM75 с архитектурными гардами и рантайм-ассертами |
+| **MMA-обёртки** (`csrc/mma.cuh`) | m8n8k16 INT8 + **m8n8k4 FP16** для SM75 (m8n8k16 FP16 валиден только на SM80+). A=2,B=2 регистра для FP16 |
+| **LDMATRIX-обёртки** (`csrc/mma.cuh`) | `ldmatrix_m8n8x1(_trans)`, `ldmatrix_m8n8x2(_trans)`, `ldmatrix_m8n8x4(_trans)` — полный набор для SM75 MMA-фрагментов |
 | **QK MMA** | INT8 m8n8k16 с ldmatrix-загрузкой Q/K фрагментов |
 | **Онлайн-softmax** | Полный FlashAttention: running max/denominator, warp-редукции через `__shfl_xor_sync` |
 | **P → smem → ldmatrix** | Softmax-выход пишется в shared memory, перезагружается через ldmatrix для корректной MMA-раскладки |
-| **PV MMA** | FP16 m8n8k16 — fk-цикл итерирует **столбцы** V (head_dim/8 суб-тайлов) |
+| **PV MMA** | FP16 m8n8k4 с pv_k-циклом (K=4 → 2 прохода на 8×8 тайл). fk-цикл итерирует **столбцы** V (head_dim/8 суб-тайлов) |
 | **2D RO_accum** | Раздельные аккумуляторы для каждого mq-подтайла, онлайн-softmax через K-тайлы |
 | **Output store** | Прямая запись в global O (без smem_O roundtrip) + smem_O staging вариант для бенчмарка |
 | **static_assert** | Проверки на этапе компиляции: делимость head_dim, CTA_Q/WARP_Q, CTA_K/WARP_K |
@@ -174,7 +175,7 @@ SageAttention-SM75-path/
 │   ├── attn_cuda_sm75.h       # ← основной SM75-кернел
 │   ├── pybind_sm75.cpp         # ← pybind-регистрация
 │   └── qk_int_sv_f16_cuda_sm75.cu
-├── csrc/mma.cuh                # ← SM75 MMA-обёртки (int8 + fp16)
+├── csrc/mma.cuh                # ← SM75 MMA-обёртки (int8 m8n8k16, fp16 m8n8k4) + ldmatrix (x1/x2/x4 + _trans)
 ├── sageattention/core.py       # ← авто-диспетчер + SM75-функция
 ├── test_sm75_kernel.py         # ← юнит-тесты
 ├── bench/bench_sm75_output_store.py  # ← бенчмарк output store
