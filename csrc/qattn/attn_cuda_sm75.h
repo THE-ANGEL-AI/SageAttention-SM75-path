@@ -118,7 +118,6 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
     // Tile counts (kernel-scope, used throughout)
     constexpr int NUM_M_TILES_QK = WARP_Q / MMA_QK_M_SM75;  // QK sub-tiles along M (e.g., 16/8 = 2)
     constexpr int NUM_N_TILES = WARP_K / MMA_QK_N_SM75;     // QK sub-tiles along N (e.g., 16/8 = 2)
-    constexpr int NUM_M_TILES_SV = WARP_Q / MMA_SV_M_SM75;   // PV sub-tiles along M (e.g., 16/16 = 1)
     constexpr int NUM_N_V_TILES = head_dim / MMA_SV_N_SM75;   // V column sub-tiles (e.g. 8 for hd=64)
 
     // QK Accumulator (INT8 MMA -> INT32)
