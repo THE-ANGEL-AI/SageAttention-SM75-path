@@ -205,8 +205,8 @@ def sageattn(
             q, k, v,
             tensor_layout=tensor_layout, is_causal=is_causal,
             sm_scale=sm_scale, return_lse=return_lse,
-            # SM75 specific defaults if needed, e.g., only 'per_warp' might be efficient
             qk_quant_gran=kwargs.get("qk_quant_gran", "per_warp"),
+            smooth_k=kwargs.get("smooth_k", True),
         )
     elif arch == "sm80" or arch == "sm86":
         return sageattn_qk_int8_pv_fp16_cuda(q, k, v, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32")

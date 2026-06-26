@@ -1,0 +1,5 @@
+[project]
+name = "sageattention-sm75-comfyui"
+version = "1.0.0"
+description = "SageAttention SM75 INT8 attention for NVIDIA T4 (Turing) — ComfyUI custom node"
+requires-python = ">=3.9"
