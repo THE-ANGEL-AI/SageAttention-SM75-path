@@ -744,8 +744,8 @@ __device__ __forceinline__ void mma_sync_m8n8k16_row_col_s8s8s32(int32_t* C, uin
 
 // mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32
 // Valid for SM75+ (Turing) fp16 tensor cores:
-//   A = 1 × uint32 (2 × f16 packed into 1 × b32)
-//   B = 1 × uint32 (2 × f16 packed into 1 × b32)
+//   A = 2 × uint32 (4 × f16 packed into 2 × b32)
+//   B = 2 × uint32 (4 × f16 packed into 2 × b32)
 //   C/D = 2 × float (2 × f32 per thread, each holds 4 elements of the 8×8 output)
 // NOTE: m8n8k4 is the ONLY fp16 MMA shape valid on SM75 (Turing).
 //       m8n8k16 fp16 requires SM80+ (Ampere).
@@ -758,23 +758,23 @@ __device__ __forceinline__ void mma_sync_m8n8k4_row_col_f16f16f32(float* C, uint
     asm volatile(
         "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "
         "{%0, %1},"
-        "{%2},"
-        "{%3},"
-        "{%4, %5};\n"
+        "{%2, %3},"
+        "{%4, %5},"
+        "{%6, %7};\n"
         : "=&f"(C_out[0]), "=&f"(C_out[1])
-        : "r"(A[0]),
-          "r"(B[0]),
+        : "r"(A[0]), "r"(A[1]),
+          "r"(B[0]), "r"(B[1]),
           "f"(C[0]), "f"(C[1]));
   } else {
     asm volatile(
         "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "
         "{%0, %1},"
-        "{%2},"
-        "{%3},"
-        "{%4, %5};\n"
+        "{%2, %3},"
+        "{%4, %5},"
+        "{%6, %7};\n"
         : "=&f"(C_out[0]), "=&f"(C_out[1])
-        : "r"(A[0]),
-          "r"(B[0]),
+        : "r"(A[0]), "r"(A[1]),
+          "r"(B[0]), "r"(B[1]),
           "f"(0.0f), "f"(0.0f));
   }
   C[0] = C_out[0];
