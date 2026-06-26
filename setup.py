@@ -147,33 +147,34 @@ for capability in sorted(list(compute_capabilities)):
         HAS_SM75 = True
         # SM75 should work with CUDA 11.8+, no higher requirement needed from base
         enable_bf16 = False # Turing does not support BF16
-        arch_flags.append(f"-gencode arch=compute_75,code=sm_75")
+        arch_flags.append("-gencode")
+        arch_flags.append("arch=compute_75,code=sm_75")
     elif major == 8 and minor == 0:
         HAS_SM80 = True
         # SM80 requires CUDA 11.1+, covered by base 11.8
-        arch_flags.append(f"-gencode arch=compute_80,code=sm_80")
+        arch_flags.append("-gencode",`n        f"arch=compute_80,code=sm_80")
     elif major == 8 and minor == 6:
         HAS_SM86 = True
         # SM86 requires CUDA 11.1+, covered by base 11.8
-        arch_flags.append(f"-gencode arch=compute_86,code=sm_86")
+        arch_flags.append("-gencode",`n        f"arch=compute_86,code=sm_86")
     elif major == 8 and minor == 9:
         HAS_SM89 = True
         if nvcc_cuda_version < Version("12.0"): # FP8 MMA support added later, requires newer compiler
              # Relaxing slightly from 12.4, needs testing. Stricter check if issues arise.
              raise RuntimeError(f"Compute capability 8.9 requires CUDA 12.0 or higher (detected {nvcc_cuda_version}).")
-        arch_flags.append(f"-gencode arch=compute_89,code=sm_89")
+        arch_flags.append("-gencode",`n        f"arch=compute_89,code=sm_89")
     elif major == 9 and minor == 0:
         HAS_SM90 = True
         if nvcc_cuda_version < Version("12.0"): # WGMMA requires CUDA 12.0+
             raise RuntimeError(f"Compute capability 9.0 requires CUDA 12.0 or higher (detected {nvcc_cuda_version}).")
         # Use 90a for WGMMA
-        arch_flags.append(f"-gencode arch=compute_90,code=sm_90a")
+        arch_flags.append("-gencode",`n        f"arch=compute_90,code=sm_90a")
     # Placeholder for future Blackwell check (SM120 / compute_120 ?)
     # elif major == 12 and minor == 0:
     #     HAS_SM120 = True
     #     if nvcc_cuda_version < Version("12.8"): # Example requirement
     #         raise RuntimeError(f"Compute capability 12.0 requires CUDA 12.8 or higher (detected {nvcc_cuda_version}).")
-    #     arch_flags.append(f"-gencode arch=compute_120,code=sm_120a") # Hypothetical flag
+    #     arch_flags.append("-gencode",`n        f"arch=compute_120,code=sm_120a") # Hypothetical flag
     else:
         warnings.warn(f"Unhandled compute capability: {capability}. Skipping specific flags.")
         # Add generic PTX compilation for forward compatibility if desired

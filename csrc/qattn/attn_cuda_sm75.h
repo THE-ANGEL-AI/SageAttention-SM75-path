@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#ifdef __CUDACC__
+
 #include "../utils.cuh"
 #include <cuda_fp16.h>
 #include <torch/extension.h>
@@ -22,6 +24,7 @@
 #include "../math.cuh"
 #include "../dispatch_utils.h"
 #include "attn_utils.cuh" // Contains shared enums and helpers
+#include "../reduction_utils.cuh" // vllm::warpReduceSum, warpReduceMax
 
 // Define SM75 specific constants (Adjust based on tuning)
 #define PACK_SIZE_INT8 4  // Loading 4 int8s into a uint32_t
@@ -549,3 +552,19 @@ torch::Tensor qk_int8_sv_f16_accum_f32_attn_sm75(
 
     return lse;
 }
+
+#endif  // __CUDACC__
+
+// Declaration for non-CUDA compilers (e.g. pybind11)
+torch::Tensor qk_int8_sv_f16_accum_f32_attn_sm75(
+                    torch::Tensor query,
+                    torch::Tensor key,
+                    torch::Tensor value,
+                    torch::Tensor output,
+                    torch::Tensor query_scale,
+                    torch::Tensor key_scale,
+                    int tensor_layout,
+                    int is_causal,
+                    int qk_quant_gran,
+                    float sm_scale,
+                    int return_lse);

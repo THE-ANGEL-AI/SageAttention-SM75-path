@@ -653,4 +653,58 @@ __device__ __forceinline__ void rowsum_f8f8f32(float* d, uint32_t* s) {
 #endif
 }
 
+// ===== SM75 (Turing) MMA wrappers =====
+// mma.sync.aligned.m8n8k32.row.col.s32.s8.s8.s32
+template <MMAMode mma_mode = MMAMode::kInplaceUpdate>
+__device__ __forceinline__ void mma_sync_m8n8k32_row_col_s8s8s32(int32_t* C, uint32_t* A, uint32_t* B) {
+  if constexpr (mma_mode == MMAMode::kInplaceUpdate) {
+    asm volatile(
+        "mma.sync.aligned.m8n8k32.row.col.s32.s8.s8.s32 "
+        "{%0, %1, %2, %3},"
+        "{%4, %5, %6, %7},"
+        "{%8, %9},"
+        "{%10, %11, %12, %13};\n"
+        : "=r"(C[0]), "=r"(C[1]), "=r"(C[2]), "=r"(C[3])
+        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
+          "r"(C[0]), "r"(C[1]), "r"(C[2]), "r"(C[3]));
+  } else {
+    asm volatile(
+        "mma.sync.aligned.m8n8k32.row.col.s32.s8.s8.s32 "
+        "{%0, %1, %2, %3},"
+        "{%4, %5, %6, %7},"
+        "{%8, %9},"
+        "{%10, %11, %12, %13};\n"
+        : "=r"(C[0]), "=r"(C[1]), "=r"(C[2]), "=r"(C[3])
+        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
+          "r"(0), "r"(0), "r"(0), "r"(0));
+  }
+}
+
+// mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32
+template <MMAMode mma_mode = MMAMode::kInplaceUpdate>
+__device__ __forceinline__ void mma_sync_m16n8k8_row_col_f16f16f32(float* C, uint32_t* A, uint32_t* B) {
+  if constexpr (mma_mode == MMAMode::kInplaceUpdate) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3},"
+        "{%4, %5, %6, %7},"
+        "{%8, %9},"
+        "{%10, %11, %12, %13};\n"
+        : "=f"(C[0]), "=f"(C[1]), "=f"(C[2]), "=f"(C[3])
+        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
+          "f"(C[0]), "f"(C[1]), "f"(C[2]), "f"(C[3]));
+  } else {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3},"
+        "{%4, %5, %6, %7},"
+        "{%8, %9},"
+        "{%10, %11, %12, %13};\n"
+        : "=f"(C[0]), "=f"(C[1]), "=f"(C[2]), "=f"(C[3])
+        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
+          "f"(0.f), "f"(0.f), "f"(0.f), "f"(0.f));
+  }
+}
+// ===== END SM75 wrappers =====
+
 } // namespace mma
