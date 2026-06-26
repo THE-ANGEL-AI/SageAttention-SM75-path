@@ -1,0 +1,19 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "torch>=2.3.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sageattention"
+version = "2.1.1"
+description = "⚡ SageAttention-SM75 — INT8 QK + FP16 PV attention for NVIDIA T4 (Turing) · форк THE-ANGEL-AI"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "THEANGELAI", email = "300989sanek@gmail.com"},
+]
+readme = "README.md"
+urls = {repository = "https://github.com/THE-ANGEL-AI/SageAttention-SM75-path"}
