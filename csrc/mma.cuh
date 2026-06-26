@@ -712,7 +712,50 @@ __device__ __forceinline__ void rowsum_f8f8f32(float* d, uint32_t* s) {
 #endif
 }
 
-// ===== SM75 (Turing) MMA wrappers =====
+// mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32
+// Valid for SM75+ (Turing) fp16 tensor cores:
+//   A = 2 × uint32 (4 × f16 packed into 2 × b32)
+//   B = 1 × uint32 (2 × f16 packed into 1 × b32)
+//   C/D = 4 × float (4 × f32 per thread)
+// NOTE: K=8 vs K=16: A and B registers are halved (K dimension halved).
+//       C/D stays at 4 (M=16, N=8 unchanged).
+// NOTE: PTX requires D and C operands to be non-overlapping registers.
+template <MMAMode mma_mode = MMAMode::kInplaceUpdate>
+__device__ __forceinline__ void mma_sync_m16n8k8_row_col_f16f16f32(float* C, uint32_t* A,
+                                                                     uint32_t* B) {
+#ifdef MMA_F16F16F32_M16N8K8_ENABLED
+  float C_out[4];
+  if constexpr (mma_mode == MMAMode::kInplaceUpdate) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+        "{%0,  %1,  %2,  %3},"
+        "{%4,  %5},"
+        "{%6},"
+        "{%7, %8, %9, %10};\n"
+        : "=&f"(C_out[0]), "=&f"(C_out[1]), "=&f"(C_out[2]), "=&f"(C_out[3])
+        : "r"(A[0]), "r"(A[1]),
+          "r"(B[0]),
+          "f"(C[0]), "f"(C[1]), "f"(C[2]), "f"(C[3]));
+  } else {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+        "{%0,  %1,  %2,  %3},"
+        "{%4,  %5},"
+        "{%6},"
+        "{%7, %8, %9, %10};\n"
+        : "=&f"(C_out[0]), "=&f"(C_out[1]), "=&f"(C_out[2]), "=&f"(C_out[3])
+        : "r"(A[0]), "r"(A[1]),
+          "r"(B[0]),
+          "f"(0.0f), "f"(0.0f), "f"(0.0f), "f"(0.0f));
+  }
+  #pragma unroll
+  for (int _i = 0; _i < 4; _i++) C[_i] = C_out[_i];
+#else
+  RUNTIME_ASSERT("mma_sync_m16n8k8_row_col_f16f16f32 requires SM75+ (Turing)");
+#endif
+}
+
+// ===== m8n8k4 wrapper (was used, kept for reference) =====
 // All SM75 wrappers require __CUDA_ARCH__ >= 750.
 #if (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 750))
 #define MMA_SM75_ENABLED
