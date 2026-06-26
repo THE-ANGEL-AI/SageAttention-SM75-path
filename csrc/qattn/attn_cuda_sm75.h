@@ -36,9 +36,9 @@
 #define MMA_QK_N_SM75 8
 #define MMA_QK_K_SM75 16 // INT8 MMA K dim (m8n8k16 for SM75 Turing)
 
-#define MMA_SV_M_SM75 8  // m8n8k16 fp16 MMA M dim (SM75: m8, not m16)
+#define MMA_SV_M_SM75 8  // m8n8k4 fp16 MMA M dim (SM75: m8, not m16)
 #define MMA_SV_N_SM75 8
-#define MMA_SV_K_SM75 16 // m8n8k16 fp16 MMA K dim
+#define MMA_SV_K_SM75 4 // m8n8k4 fp16 MMA K dim (only valid fp16 shape on SM75)
 
 // --- SM75 Kernel Implementation ---
 template< uint32_t CTA_Q, uint32_t CTA_K, uint32_t WARP_Q, uint32_t WARP_K, uint32_t head_dim,
@@ -126,7 +126,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
     int32_t RS_accum[NUM_QK_ACCUM];
 
     // PV Accumulator (FP16 MMA -> FP32)
-    // SM75: m8n8k16 => 2 FP32 outputs per MMA call.
+    // SM75: m8n8k4 => 2 FP32 outputs per MMA call.
     // NUM_N_V_TILES = head_dim / MMA_SV_N V column sub-tiles.
     // Each (mq, fk) sub-tile needs 2 accumulators.
     // 2D layout: RO_accum[mq][fk*2+0..1] stored flat.
@@ -135,7 +135,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
     float RO_accum[NUM_PV_ACCUM_TOTAL];
 
     // --- Online Softmax State ---
-    // SM75 m8n8k16 MMA: each thread handles 1 row per mq sub-tile (2 values c0,c1).
+    // SM75 m8n8k4 MMA: each thread handles 1 row per mq sub-tile (2 values c0,c1).
     // m_i[mq] and l_i[mq] track the running max/denominator for the row.
     float m_i[NUM_M_TILES]; // Running max per mq sub-tile
     float l_i[NUM_M_TILES]; // Running sum per mq sub-tile
@@ -334,8 +334,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 l_local += __shfl_xor_sync(0xffffffff, l_local, 16);
                 l_i[mq] += l_local;
 
-                // 8. Store P to shared memory, then reload via ldmatrix for correct
-                //    thread→data distribution in PV MMA m8n8k16 (A=1 register/thread).
+                // 8. Store P to shared memory for PV MMA (m8n8k4, A=1 register/thread).
                 //    Thread i writes to row r = lane_id % 8, cols c0 = (i/8)*2, c1 = c0+1.
                 half* smem_P_warp = smem_P + warp_id_in_block * P_TILE_ELEMS;
                 uint32_t r = lane_id % 8;
@@ -343,27 +342,31 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 smem_P_warp[r * MMA_QK_N_SM75 + (lane_id / 8) * 2 + 1] = __float2half_rn(p1);
                 __syncwarp(); // Ensure all 32 threads finished writing before ldmatrix
 
-                // Load P via ldmatrix (x4, 8 threads, take R[0] for m8n8k16 A operand)
-                half* smem_P_row_ptr = smem_P_warp + r * MMA_QK_N_SM75;
-                uint32_t p_frag_reg_load[4] = {0, 0, 0, 0};
-                mma::ldmatrix_m8n8x4(p_frag_reg_load, smem_P_row_ptr);
-                uint32_t p_frag_reg[1] = {p_frag_reg_load[0]};
-
-                // --- PV Computation (FP16 MMA m8n8k16): RO += P × V ---
+                // --- PV Computation (FP16 MMA m8n8k4): RO += P × V ---
+                // P is 8×8, MMA K=4 → split K dimension into 2 passes (pv_k = 0, 1)
+                constexpr int PV_K_STEPS = MMA_QK_N_SM75 / MMA_SV_K_SM75; // 8 / 4 = 2
                 #pragma unroll
-                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-                    // Load V fragment: rows = nk*8 (K-tile rows), cols = fk*8 (V columns)
-                    half* smem_V_ptr = smem_V + (k_start_warp + nk * MMA_QK_N_SM75 + lane_id % 8) * HEAD_DIM_PADDED_FP16 + fk * MMA_SV_N_SM75;
-                    uint32_t v_frag_reg_load[4] = {0, 0, 0, 0};
-                    mma::ldmatrix_m8n8x4_trans(v_frag_reg_load, smem_V_ptr);
-                    uint32_t v_frag_reg[1] = {v_frag_reg_load[0]};
+                for (int pv_k = 0; pv_k < PV_K_STEPS; ++pv_k) {
 
-                    // PV MMA: RO_accum[mq][fk*2..fk*2+1] += P × V[fk]
-                    mma::mma_sync_m8n8k16_row_col_f16f16f32<mma::MMAMode::kInplaceUpdate>(
-                        RO_accum + mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2,
-                        p_frag_reg,
-                        v_frag_reg);
-                } // End fk loop (V column sub-tiles)
+                    // Load K=4 chunk of P (2 fp16 values per thread = 1 b32 register)
+                    half* smem_P_row_ptr = smem_P_warp + r * MMA_QK_N_SM75 + pv_k * MMA_SV_K_SM75;
+                    uint32_t p_frag_reg_k[1] = {0};
+                    mma::ldmatrix_m8n8x1(p_frag_reg_k, smem_P_row_ptr);
+
+                    #pragma unroll
+                    for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+                        // Load K=4 chunk of V (row-shifted by pv_k * MMA_SV_K_SM75)
+                        half* smem_V_ptr = smem_V + (k_start_warp + nk * MMA_QK_N_SM75 + pv_k * MMA_SV_K_SM75 + lane_id % 8) * HEAD_DIM_PADDED_FP16 + fk * MMA_SV_N_SM75;
+                        uint32_t v_frag_reg_k[1] = {0};
+                        mma::ldmatrix_m8n8x1_trans(v_frag_reg_k, smem_V_ptr);
+
+                        // PV MMA: RO_accum[mq][fk*2..fk*2+1] += P_chunk × V_chunk
+                        mma::mma_sync_m8n8k4_row_col_f16f16f32<mma::MMAMode::kInplaceUpdate>(
+                            RO_accum + mq * NUM_PV_ACCUM_PER_M_TILE + fk * 2,
+                            p_frag_reg_k,
+                            v_frag_reg_k);
+                    } // End fk loop (V column sub-tiles)
+                } // End pv_k loop (K dimension split)
             } // End nk loop (S tile N dimension)
         } // End mq loop (S tile M dimension)
         __syncthreads(); // Sync after finishing work with current K/V tile before loading next

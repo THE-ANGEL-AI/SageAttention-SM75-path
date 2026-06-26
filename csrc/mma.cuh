@@ -742,23 +742,21 @@ __device__ __forceinline__ void mma_sync_m8n8k16_row_col_s8s8s32(int32_t* C, uin
 #endif
 }
 
-// mma.sync.aligned.m8n8k16.row.col.f32.f16.f16.f32
-// Valid for SM75+ (Turing) fp16 tensor cores (PTX ISA 6.5+):
+// mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32
+// Valid for SM75+ (Turing) fp16 tensor cores:
 //   A = 1 × uint32 (2 × f16 packed into 1 × b32)
 //   B = 1 × uint32 (2 × f16 packed into 1 × b32)
 //   C/D = 2 × float (2 × f32 per thread, each holds 4 elements of the 8×8 output)
-// NOTE: SM75 valid fp16 MMA shapes: m8n8k4, m8n8k16, m16n8k8, m32n8k16 (PTX ISA 6.5).
-//       m16n8k8 IS valid on SM75 (macro MMA_F16F16F32_M16N8K8_ENABLED is defined).
-//       m16n8k16 and m16n16k16 require SM80+ (Ampere).
-// NOTE: m8n8k16 uses A=1, B=1, C/D=2 registers (see PTX ISA for register layout).
+// NOTE: m8n8k4 is the ONLY fp16 MMA shape valid on SM75 (Turing).
+//       m8n8k16 fp16 requires SM80+ (Ampere).
 // NOTE: PTX requires D and C operands to be non-overlapping registers.
 template <MMAMode mma_mode = MMAMode::kInplaceUpdate>
-__device__ __forceinline__ void mma_sync_m8n8k16_row_col_f16f16f32(float* C, uint32_t* A, uint32_t* B) {
+__device__ __forceinline__ void mma_sync_m8n8k4_row_col_f16f16f32(float* C, uint32_t* A, uint32_t* B) {
 #ifdef MMA_SM75_ENABLED
   float C_out[2];
   if constexpr (mma_mode == MMAMode::kInplaceUpdate) {
     asm volatile(
-        "mma.sync.aligned.m8n8k16.row.col.f32.f16.f16.f32 "
+        "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "
         "{%0, %1},"
         "{%2},"
         "{%3},"
@@ -769,7 +767,7 @@ __device__ __forceinline__ void mma_sync_m8n8k16_row_col_f16f16f32(float* C, uin
           "f"(C[0]), "f"(C[1]));
   } else {
     asm volatile(
-        "mma.sync.aligned.m8n8k16.row.col.f32.f16.f16.f32 "
+        "mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "
         "{%0, %1},"
         "{%2},"
         "{%3},"
@@ -782,7 +780,7 @@ __device__ __forceinline__ void mma_sync_m8n8k16_row_col_f16f16f32(float* C, uin
   C[0] = C_out[0];
   C[1] = C_out[1];
 #else
-  RUNTIME_ASSERT("mma_sync_m8n8k16_row_col_f16f16f32 requires SM75+ (Turing)");
+  RUNTIME_ASSERT("mma_sync_m8n8k4_row_col_f16f16f32 requires SM75+ (Turing)");
 #endif
 }
 // ===== END SM75 wrappers =====
