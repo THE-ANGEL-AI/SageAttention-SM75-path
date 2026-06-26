@@ -668,7 +668,7 @@ __device__ __forceinline__ void mma_sync_m8n8k32_row_col_s8s8s32(int32_t* C, uin
         "{%4, %5, %6, %7},"
         "{%8, %9},"
         "{%10, %11, %12, %13};\n"
-        : "=r"(C_out[0]), "=r"(C_out[1]), "=r"(C_out[2]), "=r"(C_out[3])
+        : "=&r"(C_out[0]), "=&r"(C_out[1]), "=&r"(C_out[2]), "=&r"(C_out[3])
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
           "r"(C[0]), "r"(C[1]), "r"(C[2]), "r"(C[3]));
   } else {
@@ -678,7 +678,7 @@ __device__ __forceinline__ void mma_sync_m8n8k32_row_col_s8s8s32(int32_t* C, uin
         "{%4, %5, %6, %7},"
         "{%8, %9},"
         "{%10, %11, %12, %13};\n"
-        : "=r"(C_out[0]), "=r"(C_out[1]), "=r"(C_out[2]), "=r"(C_out[3])
+        : "=&r"(C_out[0]), "=&r"(C_out[1]), "=&r"(C_out[2]), "=&r"(C_out[3])
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
           "r"(0), "r"(0), "r"(0), "r"(0));
   }
@@ -698,7 +698,7 @@ __device__ __forceinline__ void mma_sync_m16n8k8_row_col_f16f16f32(float* C, uin
         "{%4, %5, %6, %7},"
         "{%8, %9},"
         "{%10, %11, %12, %13};\n"
-        : "=f"(C_out[0]), "=f"(C_out[1]), "=f"(C_out[2]), "=f"(C_out[3])
+        : "=&f"(C_out[0]), "=&f"(C_out[1]), "=&f"(C_out[2]), "=&f"(C_out[3])
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
           "f"(C[0]), "f"(C[1]), "f"(C[2]), "f"(C[3]));
   } else {
@@ -708,7 +708,7 @@ __device__ __forceinline__ void mma_sync_m16n8k8_row_col_f16f16f32(float* C, uin
         "{%4, %5, %6, %7},"
         "{%8, %9},"
         "{%10, %11, %12, %13};\n"
-        : "=f"(C_out[0]), "=f"(C_out[1]), "=f"(C_out[2]), "=f"(C_out[3])
+        : "=&f"(C_out[0]), "=&f"(C_out[1]), "=&f"(C_out[2]), "=&f"(C_out[3])
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]),
           "f"(0.f), "f"(0.f), "f"(0.f), "f"(0.f));
   }

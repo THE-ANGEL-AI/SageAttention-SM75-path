@@ -243,7 +243,7 @@ __global__ void qk_int8_sv_f16_accum_f32_attn_kernel_sm75(
                 // The result (P fragment) should be stored in registers as FP16 (packed).
 
                 float s_frag_f32[NUM_QK_ACCUM * 2] = {0}; // 8 floats for softmax intermediates
-                uint32_t p_frag_reg[4];  // m16n8k8 A operand: 4 x FP16 packed as uint32 (PTX: {%4, %5, %6, %7})
+                uint32_t p_frag_reg[4] = {0,0,0,0};  // m16n8k8 A operand: 4 x FP16 packed as uint32 (PTX: {%4, %5, %6, %7})
 
                 // Convert int32 accumulators to float32
                 #pragma unroll
