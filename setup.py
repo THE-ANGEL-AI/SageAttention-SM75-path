@@ -291,14 +291,14 @@ setup(
     description='Accurate and efficient plug-and-play low-bit attention.',
     long_description=open('README.md', encoding='utf-8').read(),
     long_description_content_type='text/markdown',
-    url='https://github.com/thu-ml/SageAttention',
+    url='https://github.com/THE-ANGEL-AI/SageAttention-SM75-path',
     packages=find_packages(),
     python_requires='>=3.9',
     ext_modules=ext_modules,
     cmdclass={"build_ext": BuildExtension},
     install_requires=[
-        'torch>=2.3.0', # SM75 requires PyTorch >= 2.3 (tested on 2.10.0 with CUDA 13.0)
-        'triton>=3.0.0', # Triton kernels for quantization (bundled with torch 2.6+)
+        'torch>=2.3.0',     # SM75 requires PyTorch >= 2.3
+        'triton>=3.0.0',    # Triton kernels for quant (bundled with torch 2.6+)
     ],
 
 
