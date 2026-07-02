@@ -285,10 +285,9 @@ else:
 # --- Setup Call ---
 setup(
     name='sageattention',
-    version='2.1.1', # Keep version or update as needed
-    author='SageAttention team',
-    license='Apache 2.0 License',
-    description='Accurate and efficient plug-and-play low-bit attention.',
+    version='2.1.1',
+    author='THEANGELAI',
+    description='⚡ SageAttention-SM75 — INT8 QK + FP16 PV attention for NVIDIA T4 (Turing)',
     long_description=open('README.md', encoding='utf-8').read(),
     long_description_content_type='text/markdown',
     url='https://github.com/THE-ANGEL-AI/SageAttention-SM75-path',
