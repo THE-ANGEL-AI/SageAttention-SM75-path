@@ -11,7 +11,8 @@ name = "sageattention"
 version = "2.1.1"
 description = "⚡ SageAttention-SM75 — INT8 QK + FP16 PV attention for NVIDIA T4 (Turing) · форк THE-ANGEL-AI"
 requires-python = ">=3.9"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
+dynamic = ["dependencies"]
 authors = [
     {name = "THEANGELAI", email = "300989sanek@gmail.com"},
 ]
